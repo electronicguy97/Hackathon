@@ -15,6 +15,7 @@
     '오늘 요약',
     '다음 주 월화 연차 쓸게요',
     '출근',
+    '주간보고 초안 써줘',
     '주간보고: 월 사내 그룹웨어 7시간 화면 설계, 운영 지원 1시간 서버 점검 / 차주: 화 AI 챗봇 PoC 8시간 / 이슈: 없음',
     '내일 오후 3시 소회의실 A 1시간 예약, 제목 스프린트 회의',
   ];
@@ -103,12 +104,16 @@
   const sendBtn = h('button', { type: 'submit', className: 'cb-send', text: '보내기' });
   const form = h('form', { className: 'cb-form' }, input, sendBtn);
   const closeBtn = h('button', { type: 'button', className: 'cb-close', 'aria-label': '닫기', text: '×' });
+  const newChatBtn = h('button', {
+    type: 'button', className: 'cb-new', 'aria-label': '새 대화 시작', title: '새 대화 시작'
+  });
+  newChatBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg><span>새 대화</span>';
   const panel = h('section', { className: 'cb-panel', 'aria-label': '업무 도우미', hidden: '' },
     h('header', { className: 'cb-header' },
       h('div', {},
         h('strong', { text: '업무 도우미' }),
         h('span', { className: 'cb-sub', text: '연차 · 주간보고 · 출퇴근 · 결재 · 회의실' })),
-      closeBtn),
+      h('div', { className: 'cb-header-actions' }, newChatBtn, closeBtn)),
     log,
     form);
 
@@ -177,9 +182,25 @@
     say('bot', `${name || ''} 님, 무엇을 도와드릴까요?\n${capabilitiesText}`, chips(suggestionList));
   }
 
-  userSelect()?.addEventListener('change', () => {
+  // 대화 세션: 새 대화를 시작하면 번호가 바뀌고, 이전 세션에서 늦게 도착한 답장은 버린다
+  let session = 0;
+  function resetConversation() {
+    session += 1;
+    busy = false;
+    sendBtn.disabled = false;
+    input.value = '';
     log.replaceChildren();
+  }
+
+  userSelect()?.addEventListener('change', () => {
+    resetConversation();
     if (!panel.hidden) greet();
+  });
+
+  newChatBtn.addEventListener('click', () => {
+    resetConversation();
+    greet();
+    input.focus();
   });
 
   // ---------- 보내기 ----------
@@ -195,6 +216,7 @@
     }
     busy = true;
     sendBtn.disabled = true;
+    const mySession = session;
     say('me', text);
     input.value = '';
     const typing = say('bot', '');
@@ -211,6 +233,7 @@
     try {
       const res = await api('/api/chat', { method: 'POST', body: { userId, text } })
         .finally(pad);
+      if (mySession !== session) return;   // 그사이 새 대화를 시작했으면 무시
       typing.remove();
       // 관련 화면으로 먼저 전환 (출퇴근, 주간보고, 연차, 승인, 문서, 홈)
       if (res.screen) {
@@ -254,12 +277,15 @@
       }
       if (res.action) await handleAction(res.action, msg);
     } catch (err) {
+      if (mySession !== session) return;
       typing.remove();
       say('bot', err.message).classList.add('is-error');
     } finally {
-      busy = false;
-      sendBtn.disabled = false;
-      input.focus();
+      if (mySession === session) {
+        busy = false;
+        sendBtn.disabled = false;
+        input.focus();
+      }
     }
   }
 
@@ -336,7 +362,9 @@
       personalSchedule: pickText('personalSchedule'),
       issues: pickText('issues'),
       requests: pickText('requests'),
-      entries: [...baseEntries, ...patchEntries],
+      // 같은 요일·구분·내용의 행은 한 번만 (초안을 두 번 저장해도 중복되지 않게)
+      entries: [...baseEntries, ...patchEntries.filter((p) => !baseEntries.some((b) =>
+        b.day === p.day && b.category === p.category && b.content === p.content))],
     };
   }
 
@@ -467,14 +495,19 @@
       const nextPatch = p.next || {};
 
       const card = h('div', { className: 'cb-card' },
+        action.draft ? h('div', { className: 'cb-label', text: '초안 (기존 보고에 아래 항목을 더해요)' }) : null,
         renderGroupedWeeklySection('금주 실적', curPatch.entries),
         renderGroupedWeeklySection('차주 계획', nextPatch.entries),
         curPatch.personalSchedule ? row('개인일정', curPatch.personalSchedule) : null,
+        nextPatch.personalSchedule ? row('차주 개인일정', nextPatch.personalSchedule) : null,
         curPatch.issues ? row('이슈사항', curPatch.issues) : null,
         curPatch.requests ? row('요청/전달', curPatch.requests) : null);
 
       const submit = h('button', { type: 'button', className: 'cb-btn cb-primary', text: '제출', disabled: !action.canSubmit });
-      const draft = h('button', { type: 'button', className: 'cb-btn', text: '임시저장' });
+      const draft = h('button', {
+        type: 'button', className: action.draft ? 'cb-btn cb-primary' : 'cb-btn',
+        text: action.draft ? '초안 임시저장' : '임시저장'
+      });
       const cancel = h('button', { type: 'button', className: 'cb-btn', text: '취소' });
       const buttons = action.canSubmit ? [submit, draft, cancel] : [draft, cancel];
 

@@ -1394,6 +1394,25 @@ function home(user) {
   };
 }
 
+// 챗봇 "주간보고 초안 써줘": 이번 주·다음 주 내 연차, 내가 예약한 회의, 이번 주 출퇴근, 현재 보고(템플릿)
+function weeklyDraftData(user) {
+  const weekStart = monday(localDate(new Date()));
+  const nextStart = addDays(weekStart, 7);
+  const nextEnd = addDays(nextStart, 4);
+  return {
+    weekStart,
+    nextStart,
+    report: currentReport(user),
+    leaves: listLeave.all(user.id)
+      .filter((l) => ['approved', 'pending'].includes(l.status) && l.startDate <= nextEnd && l.endDate >= weekStart)
+      .map(({ type, startDate, endDate, status }) => ({ type, startDate, endDate, status })),
+    reservations: listMyReservations.all(user.id, weekStart)
+      .filter((r) => r.date <= nextEnd)
+      .map(({ date, startTime, endTime, title, roomName }) => ({ date, startTime, endTime, title, roomName })),
+    attendance: monthAttendance.all(user.id, weekStart, addDays(weekStart, 4))
+  };
+}
+
 // 챗봇이 DB 조회로 바로 답하지 못한 질문을 LLM 에 넘길 때 근거로 주는 "내 데이터" 묶음
 function chatSnapshot(user) {
   const today = localDate(new Date());
@@ -1529,7 +1548,8 @@ async function handleApi(req, res, pathname, query) {
           rooms: () => listRooms.all(),
           reservations: (date) => listDayReservations.all(date),
           searchDocs: (q) => searchDocs(q, 3),
-          snapshot: () => chatSnapshot(chatUser)
+          snapshot: () => chatSnapshot(chatUser),
+          weeklyDraft: () => weeklyDraftData(chatUser)
         }));
       }
       case '/api/chat/story': {

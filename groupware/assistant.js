@@ -7,7 +7,7 @@
 // - LLM 은 "이해"만 담당한다. 잔여 연차, 결재 건수 같은 숫자는 server.js 가 DB 값으로 채운다.
 // - 실제 신청·저장은 사용자가 챗봇 카드에서 확인 버튼을 눌러야 기존 API 로 실행된다.
 
-const INTENTS = ['leave_request', 'weekly_report', 'room_request', 'room_status', 'check_in', 'check_out',
+const INTENTS = ['leave_request', 'weekly_report', 'weekly_draft', 'room_request', 'room_status', 'check_in', 'check_out',
   'status', 'approvals', 'navigate', 'doc_question', 'question', 'help'];
 const ROUTE_LABEL = {
   home: '홈', attendance: '출퇴근', weekly: '주간보고', leave: '연차', approvals: '승인', rooms: '회의실 예약',
@@ -78,6 +78,10 @@ function classifyByRules(text) {
   // "주간보고 탭 열어줘", "연차 화면으로 이동" → 화면 이동
   const weeklyForm = /^(?:주간\s*보고|위클리|주보|타임\s*시트)\s*[:：]/.test(t);
   const navigation = /(열어|열기|이동|가\s*줘|가자|띄워|들어가|켜\s*줘)|(?:탭|메뉴|화면|페이지)\s*$/.test(t);
+  if (!weeklyForm && WEEKLY_WORD.test(t) && !/\d\s*(시간|h)/i.test(t) &&
+      /(초안|자동|대신|만들어|채워|써\s*줘|작성\s*해\s*(줘|주세요)|작성해줘)/.test(t)) {
+    return 'weekly_draft';
+  }
   if (!weeklyForm && routeByKeywords(t) && navigation) {
     return 'navigate';
   }
@@ -95,7 +99,7 @@ function classifyByRules(text) {
   if (/^(홈|대시보드|메인|출퇴근|근태|출근부|주간보고|위클리|주보|타임시트|연차|휴가|반차|승인|결재|결재함|공지|공지사항|캘린더|달력|회의실|회의실예약|문서|위키)$/.test(bare)) {
     return 'navigate';
   }
-  const asking = /(남은|잔여|몇\s*일|며칠|얼마|상태|했(나|어|니)|됐(나|어|니)|알려|보여|언제|\?)/.test(t);
+  const asking = /(남은|남았|남아|잔여|몇|며칠|얼마|상태|했(나|어|니)|됐(나|어|니)|알려|보여|언제|\?)/.test(t);
   const request = t.split(/(?:[,;]\s*|\s+)(?:사유|제목|참석자)\s*[:：]?\s*/, 1)[0];
   const wikiTopic = /(문서|위키|가이드|규정|마일스톤|출시|오픈|\bGW-\d+\b|담당|기한)/i.test(request);
   const liveLookup =
@@ -117,6 +121,7 @@ function classifyByRules(text) {
   if (/(출근|퇴근)/.test(t) && !/출퇴근/.test(t) && !asking) {
     return /퇴근/.test(t) ? 'check_out' : 'check_in';
   }
+  if (/(연차|반차|휴가|월차)/.test(t) && /(남은|남았|남아|잔여|몇|며칠|얼마)/.test(t)) return 'status';
   if (/(연차|반차|휴가|월차)/.test(t) && !asking) return 'leave_request';
   if (/(결재|승인)/.test(t) && !/반려/.test(t)) return 'approvals';
   // 홈 요약으로 답할 수 있는 질문만 status, 나머지 질문은 question (API 가 있으면 AI 가 내 데이터로 답함)
@@ -411,7 +416,8 @@ function systemPrompt(today) {
     '',
     'intent:',
     '- leave_request: 연차·반차·휴가를 신청하려는 문장',
-    '- weekly_report: 주간보고 작성·저장·제출 또는 주간보고 요약 요청',
+    '- weekly_report: 주간보고 작성·저장·제출 또는 주간보고 요약 요청 (업무 내용이 문장에 들어 있음)',
+    '- weekly_draft: 업무 내용 없이 "주간보고 초안 써줘", "주간보고 자동으로 채워줘"처럼 초안 작성을 맡기는 문장',
     '- room_request / room_status: 회의실 예약 / 회의실 예약 현황 조회',
     '- check_in / check_out: 지금 출근 / 퇴근 처리 요청',
     '- status: 잔여 연차, 출근 여부, 주간보고 상태, 오늘 부재자, 공지 등 조회',
@@ -669,6 +675,7 @@ const HELP = [
   '이런 걸 할 수 있어요.',
   '· "다음 주 월화 연차 쓸게요"',
   `· "${WEEKLY_EXAMPLE}"`,
+  '· "주간보고 초안 써줘" (휴가·회의로 초안을 채워 임시저장)',
   '· "출근" / "퇴근"',
   '· "내일 오후 3시 소회의실 A 1시간 예약, 제목 스프린트 회의"',
   '· "오늘 요약", "오늘 회의실 현황", "잔여 연차 알려줘"',
@@ -854,10 +861,108 @@ function roomStatusReply(text, ctx, today) {
   return [`${day} 회의실 예약은 ${reservations.length}건이에요.`, ...lines].join('\n');
 }
 
+// ---------- 주간보고 초안 (DB 데이터로 채움, 임시저장까지만) ----------
+// data: server.js weeklyDraftData() → { weekStart, nextStart, report, leaves, reservations, attendance }
+// 지난주 차주 계획은 이미 report(템플릿)에 들어 있으므로, 여기서는 그 위에 더할 항목만 만든다.
+
+const DAY_LABEL_KO = { mon: '월', tue: '화', wed: '수', thu: '목', fri: '금' };
+
+function weekdayKey(isoDate) {
+  const dow = new Date(`${isoDate}T00:00:00Z`).getUTCDay();
+  return dow >= 1 && dow <= 5 ? WEEKLY_DAYS[dow - 1] : null;
+}
+const shortDate = (isoDate) => `${+isoDate.slice(5, 7)}/${+isoDate.slice(8, 10)}`;
+const minutesOf = (hhmm) => +hhmm.slice(0, 2) * 60 + +hhmm.slice(3, 5);
+const sameEntry = (a, b) => a.day === b.day && a.category === b.category && a.content === b.content;
+
+function buildWeeklyDraft(data) {
+  const { weekStart, nextStart, report, leaves, reservations, attendance } = data;
+  const nextEnd = iso(addDays(new Date(`${nextStart}T00:00:00Z`), 4));
+  const adds = { current: [], next: [] };
+  const schedules = { current: [], next: [] };
+  const partOf = (isoDate) => (isoDate < nextStart ? 'current' : 'next');
+  const push = (part, entry) => {
+    const existing = report[part]?.entries ?? [];
+    if (!existing.some((e) => sameEntry(e, entry)) && !adds[part].some((e) => sameEntry(e, entry))) {
+      adds[part].push(entry);
+    }
+  };
+
+  // 연차·반차 → 휴가 행 + 개인일정
+  for (const leave of leaves) {
+    let d = new Date(`${leave.startDate > weekStart ? leave.startDate : weekStart}T00:00:00Z`);
+    const last = leave.endDate < nextEnd ? leave.endDate : nextEnd;
+    for (; iso(d) <= last; d = addDays(d, 1)) {
+      const day = weekdayKey(iso(d));
+      if (!day) continue;
+      const label = `${TYPE_LABEL[leave.type] ?? '연차'}${leave.status === 'pending' ? ' (결재 대기)' : ''}`;
+      const part = partOf(iso(d));
+      push(part, { day, category: '휴가', workType: '휴가', content: `- ${label}`, hours: leave.type === 'annual' ? 8 : 4 });
+      schedules[part].push(`${shortDate(iso(d))}(${DAY_LABEL_KO[day]}) ${label}`);
+    }
+  }
+
+  // 내가 예약한 회의 → 회의 행
+  for (const r of reservations) {
+    const day = weekdayKey(r.date);
+    if (!day || r.date > nextEnd) continue;
+    const hours = Math.max(0.5, (minutesOf(r.endTime) - minutesOf(r.startTime)) / 60);
+    push(partOf(r.date), {
+      day, category: '회의', workType: '회사',
+      content: `- ${r.title} (${r.startTime}~${r.endTime}, ${r.roomName})`, hours
+    });
+  }
+
+  const base = report.current ?? { entries: [] };
+  const allCurrent = [...(base.entries ?? []), ...adds.current];
+  const emptyDays = WEEKLY_DAYS.filter((day) => !allCurrent.some((e) => e.day === day));
+  const draftHours = allCurrent.reduce((sum, e) => sum + (Number(e.hours) || 0), 0);
+  // 점심 1시간을 뺀 실제 근무 시간 (4시간 이하 근무는 그대로)
+  const workedHours = Math.round(attendance.reduce((sum, a) => {
+    if (!a.checkOut) return sum;
+    const m = minutesOf(a.checkOut) - minutesOf(a.checkIn);
+    return sum + (m > 240 ? m - 60 : m);
+  }, 0) / 6) / 10;
+
+  const note = (part, existing) => {
+    if (schedules[part].length) {
+      const text = schedules[part].join(', ');
+      return text === existing ? '' : text;    // 이미 같은 내용이면 바꾸지 않음
+    }
+    return existing ? '' : '없음';            // 비어 있을 때만 '없음'으로 채움 (기존 내용은 유지)
+  };
+  const payload = {
+    weekStart,
+    current: {
+      entries: adds.current,
+      personalSchedule: note('current', base.personalSchedule),
+      requests: base.requests ? '' : '없음',
+      issues: ''
+    },
+    next: { entries: adds.next, personalSchedule: note('next', report.next?.personalSchedule) }
+  };
+
+  const baseCount = (base.entries ?? []).length;
+  const from = report.status === 'none' ? '지난주 차주 계획에서 가져온 항목' : '이미 작성된 항목';
+  const lines = [
+    `이번 주(${report.weekLabel ?? weekStart}) 주간보고 초안이에요. 임시저장한 뒤 주간보고 화면에서 다듬어 제출해 주세요.`,
+    `· ${from}: ${baseCount}건`,
+    `· 새로 채울 항목: 휴가 ${[...adds.current, ...adds.next].filter((e) => e.category === '휴가').length}건, ` +
+      `회의 ${[...adds.current, ...adds.next].filter((e) => e.category === '회의').length}건`
+  ];
+  if (emptyDays.length) lines.push(`· 비어 있는 요일: ${emptyDays.map((d) => DAY_LABEL_KO[d]).join('·')} — 그날 한 일을 채워 주세요.`);
+  if (attendance.length) lines.push(`· 출퇴근 기록 기준 근무 ${workedHours}시간 / 초안 합계 ${draftHours}시간`);
+
+  const changed = adds.current.length || adds.next.length || payload.current.personalSchedule ||
+    payload.current.requests || payload.next.personalSchedule;
+  return { reply: lines.join('\n'), payload, hasChanges: Boolean(changed) };
+}
+
 // 의도별 기본 화면. 메뉴와 관련된 말이면 답장보다 먼저 그 화면으로 전환한다.
 const INTENT_ROUTE = {
   leave_request: 'leave',
   weekly_report: 'weekly',
+  weekly_draft: 'weekly',
   check_in: 'attendance',
   check_out: 'attendance',
   approvals: 'approvals',
@@ -948,6 +1053,26 @@ async function respondCore(text, ctx, parsed, today) {
       };
     }
 
+    case 'weekly_draft': {
+      if (role !== 'employee') {
+        return { ...base, reply: roleWeeklyReply(ctx, role), action: openScreen('weekly') };
+      }
+      const data = ctx.weeklyDraft();
+      if (data.report.status === 'submitted' || data.report.status === 'approved') {
+        return { ...base, reply: `이번 주 주간보고는 이미 ${WEEKLY_LABEL[data.report.status]} 상태라 초안을 만들 수 없어요.` };
+      }
+      const draft = buildWeeklyDraft(data);
+      if (!draft.hasChanges) {
+        return { ...base, reply: `${draft.reply}
+더 채울 항목이 없어서 저장할 내용은 없어요. 주간보고 화면에서 확인해 주세요.` };
+      }
+      return {
+        ...base,
+        reply: draft.reply,
+        action: { kind: 'weekly', draft: true, payload: draft.payload, canSubmit: false }
+      };
+    }
+
     case 'room_request':
       return { ...base, ...roomBookingReply(text, ctx, today) };
 
@@ -992,6 +1117,14 @@ async function respondCore(text, ctx, parsed, today) {
       if (route === 'weekly' && role !== 'employee') {
         return { ...base, reply: roleWeeklyReply(ctx, role), action: openScreen('weekly') };
       }
+      if (route === 'leave' && /(남은|남았|남아|잔여|몇|며칠|얼마)/.test(text)) {
+        const b = h.balance;
+        const available = b.remaining - b.pending;
+        let reply = `잔여 연차는 ${b.remaining}일이에요. (사용 ${b.used}일 / 총 ${b.total}일)`;
+        if (b.pending) reply += `
+결재 대기 중인 ${b.pending}일을 빼면 지금 더 신청할 수 있는 건 ${available}일이에요.`;
+        return { ...base, reply, action: openScreen('leave') };
+      }
       return { ...base, reply: statusReply(h, ctx), action: route && route !== 'home' ? openScreen(route) : null };
     }
 
@@ -1018,6 +1151,7 @@ async function respondCore(text, ctx, parsed, today) {
 }
 
 module.exports = {
+  buildWeeklyDraft,
   respond,
   writeStory,
   interpret,
