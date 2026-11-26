@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('node:http');
+const { randomUUID } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,10 +13,13 @@ try {
   if (error.code !== 'ENOENT') throw error;
 }
 const assistant = require('./assistant');
+const { readWeeklyWorkbook } = require('./xlsx');
 
 const port = Number(process.env.PORT ?? 3000);
 const publicDir = path.join(__dirname, 'public');
 const dataDir = path.join(__dirname, 'data');
+const uploadsDir = path.join(dataDir, 'uploads');
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 fs.mkdirSync(dataDir, { recursive: true });
 const db = new DatabaseSync(path.join(dataDir, 'groupware.db'));
 
@@ -56,6 +60,7 @@ db.exec(`
     week_start TEXT NOT NULL,
     current_json TEXT NOT NULL,
     next_json TEXT NOT NULL,
+    file_name TEXT,
     status TEXT NOT NULL CHECK (status IN ('draft', 'submitted', 'approved', 'rejected')),
     approver_id INTEGER REFERENCES users(id),
     comment TEXT,
@@ -106,7 +111,30 @@ db.exec(`
     name TEXT NOT NULL,
     url TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS docs (
+    id INTEGER PRIMARY KEY,
+    space TEXT NOT NULL,
+    doc_key TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    labels TEXT NOT NULL,
+    author_id INTEGER NOT NULL REFERENCES users(id),
+    updated_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `);
+
+db.exec('BEGIN IMMEDIATE');
+try {
+  if (!db.prepare('PRAGMA table_info(weekly_reports)').all().some(({ name }) => name === 'file_name')) {
+    db.exec('ALTER TABLE weekly_reports ADD COLUMN file_name TEXT');
+  }
+  db.exec('COMMIT');
+} catch (error) {
+  db.exec('ROLLBACK');
+  throw error;
+}
 
 const leaveRows = `
   SELECT r.id, r.user_id AS userId, u.name AS userName, r.type,
@@ -188,7 +216,7 @@ const setCheckOut = db.prepare(`
 const reportRows = `
   SELECT r.id, r.user_id AS userId, u.name AS userName, u.team, r.week_start AS weekStart,
          r.current_json AS currentJson, r.next_json AS nextJson, r.status, r.approver_id AS approverId,
-         a.name AS approverName, r.comment, r.submitted_at AS submittedAt,
+         a.name AS approverName, r.comment, r.file_name AS fileName, r.submitted_at AS submittedAt,
          r.decided_at AS decidedAt, r.updated_at AS updatedAt
   FROM weekly_reports r JOIN users u ON u.id = r.user_id
   LEFT JOIN users a ON a.id = r.approver_id
@@ -200,18 +228,24 @@ const listTeamReports = db.prepare(`
   ${reportRows} WHERE u.team = ? AND u.role = 'employee' AND r.week_start = ?
 `);
 const saveReport = db.prepare(`
-  INSERT INTO weekly_reports (user_id, week_start, current_json, next_json, status, submitted_at, updated_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO weekly_reports (user_id, week_start, current_json, next_json, status, submitted_at, updated_at, file_name)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT (user_id, week_start) DO UPDATE SET
     current_json = excluded.current_json, next_json = excluded.next_json,
     status = excluded.status, approver_id = NULL, comment = NULL, decided_at = NULL,
-    submitted_at = excluded.submitted_at, updated_at = excluded.updated_at
+    submitted_at = excluded.submitted_at, updated_at = excluded.updated_at,
+    file_name = COALESCE(excluded.file_name, weekly_reports.file_name)
   WHERE weekly_reports.status IN ('draft', 'rejected')
   RETURNING id
 `);
 const updateReport = db.prepare(`
   UPDATE weekly_reports SET status = ?, approver_id = ?, comment = ?, decided_at = ?, updated_at = ?
   WHERE id = ? AND status = 'submitted'
+`);
+const submitDraftReport = db.prepare(`
+  UPDATE weekly_reports SET status = 'submitted', approver_id = NULL, comment = NULL, decided_at = NULL,
+    submitted_at = ?, updated_at = ?
+  WHERE id = ? AND status IN ('draft', 'rejected')
 `);
 
 const listReportingTeams = db.prepare(`
@@ -278,6 +312,27 @@ const noticeRows = `
 const findNotice = db.prepare(`${noticeRows} WHERE n.id = ?`);
 const listAttachments = db.prepare('SELECT name, url FROM notice_attachments WHERE notice_id = ? ORDER BY id');
 const insertAttachment = db.prepare('INSERT INTO notice_attachments (notice_id, name, url) VALUES (?, ?, ?)');
+const docMetadata = 'd.id, d.space, d.doc_key AS docKey, d.title, d.labels, editor.name AS updatedByName, d.updated_at AS updatedAt';
+const listDocs = db.prepare(`
+  SELECT ${docMetadata} FROM docs d JOIN users editor ON editor.id = d.updated_by
+  ORDER BY d.space, d.title, d.id
+`);
+const findDoc = db.prepare(`
+  SELECT ${docMetadata}, d.body, author.name AS authorName, d.created_at AS createdAt
+  FROM docs d JOIN users editor ON editor.id = d.updated_by JOIN users author ON author.id = d.author_id
+  WHERE d.id = ?
+`);
+const docsExist = db.prepare('SELECT 1 FROM docs LIMIT 1');
+const docSearchRows = db.prepare('SELECT id AS docId, title, space, body FROM docs ORDER BY id');
+const insertDoc = db.prepare(`
+  INSERT INTO docs (id, space, doc_key, title, body, labels, author_id, updated_by, created_at, updated_at)
+  SELECT COALESCE(MAX(id), 0) + 1, ?, 'DOC-' || (COALESCE(MAX(id), 0) + 1), ?, ?, ?, ?, ?, ?, ? FROM docs
+  RETURNING id
+`);
+const updateDoc = db.prepare(`
+  UPDATE docs SET title = ?, body = ?, labels = ?, updated_by = ?, updated_at = ?
+  WHERE id = ?
+`);
 // 해커톤 사전공고 첨부 (사내 문서라 git 에는 올리지 않음: public/files/ 는 .gitignore). 파일이 있을 때만 시드에 붙인다.
 const hackathonNotice = {
   name: '2026워크샵_비알프레임_해커톤_사전공고.html',
@@ -344,6 +399,25 @@ async function readJson(req) {
     throw new HttpError(400, 'JSON 객체를 입력해 주세요.');
   }
   return value;
+}
+
+async function readWorkbookBytes(req) {
+  if (Number(req.headers['content-length']) > MAX_UPLOAD_BYTES) {
+    req.resume();
+    throw new HttpError(413, '주간보고 파일은 2MB 이하로 업로드해 주세요.');
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    size += chunk.length;
+    if (size > MAX_UPLOAD_BYTES) break;
+    chunks.push(chunk);
+  }
+  if (size > MAX_UPLOAD_BYTES) {
+    req.resume();
+    throw new HttpError(413, '주간보고 파일은 2MB 이하로 업로드해 주세요.');
+  }
+  return Buffer.concat(chunks, size);
 }
 
 function readId(value) {
@@ -464,11 +538,180 @@ function seedDatabase() {
   db.exec('BEGIN IMMEDIATE');
   try {
     if (listUsers.all().length === 0) seedInitialRows();
+    if (!docsExist.get()) seedDocs();
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+function seedDocs() {
+  const example = '> 예시 문서입니다. 실제 일정·규정이 아닙니다.';
+  const release = [
+    example,
+    '',
+    '## 개요',
+    '출퇴근, 연차, 주간보고와 회의실 예약을 한곳에서 처리하는 첫 그룹웨어 버전입니다. 개발팀이 기능을 구현하고 사내 시범 운영에서 받은 의견을 반영합니다.',
+    '',
+    '## 마일스톤',
+    '| 단계 | 기간 | 담당 | 상태 |',
+    '| --- | --- | --- | --- |',
+    '| 요구사항 정리 | 11/23~11/27 | 김신입 | 완료 |',
+    '| 화면 설계 | 11/30~12/04 | 이분석 | 진행 중 |',
+    '| API 개발 | 12/07~12/18 | 박사원 | 예정 |',
+    '| 사내 시범 운영 | 12/21~12/24 | 박팀장 | 예정 |',
+    '| 정식 오픈 | 2027-01-04 | 박팀장 | 예정 |',
+    '',
+    '## 작업 목록',
+    '| 이슈 키 | 요약 | 담당 | 기한 | 상태 |',
+    '| --- | --- | --- | --- | --- |',
+    '| GW-101 | 요구사항 정리 | 김신입 | 11/27 | 완료 |',
+    '| GW-102 | 홈 화면 설계 | 이분석 | 12/04 | 진행 중 |',
+    '| GW-103 | 연차 결재 검증 | 김신입 | 12/11 | 예정 |',
+    '| GW-104 | 주간보고 업로드 구현 | 박사원 | 12/18 | 예정 |',
+    '| GW-105 | 회의실 예약 검증 | 이분석 | 12/18 | 예정 |',
+    '| GW-106 | 시범 운영 회고 | 박팀장 | 12/24 | 예정 |',
+    '',
+    '## 정기 회의',
+    '- 매주 월요일 10:00 주간 회의 · 중회의실',
+    '- 매주 목요일 16:00 데모 리뷰',
+    '',
+    '## 리스크',
+    '- 주간보고 양식이 바뀌면 읽어 오는 셀 위치가 달라질 수 있습니다. 시범 운영에서 양식 변경 사례를 확인합니다.',
+    '- 시범 운영 중 결재 요청이 밀리면 팀장이 미처리 건을 확인하고 추가 검증 범위를 정합니다.'
+  ].join('\n');
+  const guide = [
+    example,
+    '',
+    '## 연차 신청 기준',
+    '- 연차는 사용 3일 전까지 신청하는 것을 권장합니다.',
+    '- 반차 시간은 오전 09:00~14:00, 오후 14:00~18:00입니다.',
+    '- 연말에는 미사용 연차 안내를 확인하고 팀 일정에 맞춰 사용 계획을 세워 주세요.',
+    '',
+    '## 결재 흐름',
+    '1. 구성원이 연차 또는 반차 신청을 등록합니다.',
+    '2. 팀장이 신청을 확인하고 승인하거나 반려합니다.',
+    '3. 반려되면 결재 의견을 확인하고 신청서를 수정해 재신청합니다.',
+    '',
+    '## 회의실 예약 규칙',
+    '- 운영 시간은 08:00~20:00이며 30분 단위로 예약합니다.',
+    '- 사용하지 않을 회의실은 미리 취소해 다른 구성원이 사용할 수 있도록 합니다.',
+    '- 대회의실은 팀장 이상이 우선 예약합니다.',
+    '',
+    '## 문의처',
+    '연차와 회의실 사용 관련 문의는 경영지원팀 내선 100으로 연락해 주세요.'
+  ].join('\n');
+  const seed = db.prepare(`
+    INSERT INTO docs (space, doc_key, title, body, labels, author_id, updated_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const users = listUsers.all();
+  const authorId = (users.find(({ role }) => role === 'manager') ?? users[0]).id;
+  const timestamp = '2026-11-26T00:00:00.000Z';
+  seed.run('그룹웨어 프로젝트', 'GW', '그룹웨어 v1 출시 일정', release, '출시,마일스톤', authorId, authorId,
+    timestamp, timestamp);
+  seed.run('사내 가이드', 'GUIDE', '연차·회의실 이용 가이드', guide, '연차,회의실', authorId, authorId,
+    timestamp, timestamp);
+}
+
+function getDoc(id) {
+  const doc = findDoc.get(id);
+  if (!doc) throw new HttpError(404, '문서를 찾을 수 없습니다.');
+  return doc;
+}
+
+function readDocFields({ title, body, labels = '' }) {
+  title = textValue(title, '문서 제목을 입력해 주세요.', true);
+  if (typeof body !== 'string' || !body.trim()) throw new HttpError(400, '문서 본문을 입력해 주세요.');
+  if (body.length > 20000) throw new HttpError(400, '문서 본문은 20,000자 이하로 입력해 주세요.');
+  labels = textValue(labels, '문서 라벨은 쉼표로 구분한 문자열로 입력해 주세요.');
+  return { title, body, labels };
+}
+
+function createDoc(payload) {
+  const author = getUser(readId(payload.userId));
+  const space = textValue(payload.space, '스페이스 이름을 입력해 주세요.', true);
+  const { title, body, labels } = readDocFields(payload);
+  const timestamp = new Date().toISOString();
+  const { id } = insertDoc.get(space, title, body, labels, author.id, author.id, timestamp, timestamp);
+  return getDoc(id);
+}
+
+function editDoc(id, payload) {
+  const editor = getUser(readId(payload.userId));
+  const { title, body, labels } = readDocFields(payload);
+  const { changes } = updateDoc.run(title, body, labels, editor.id, new Date().toISOString(), id);
+  if (!changes) throw new HttpError(404, '문서를 찾을 수 없습니다.');
+  return getDoc(id);
+}
+
+const DOC_PARTICLE = /(?:으로|까지|부터|에서|은|는|이|가|을|를|에|의|로|와|과|도|만|요)$/;
+
+function searchTokens(text) {
+  const words = new Set();
+  const bigrams = new Set();
+  const tokens = text.normalize('NFC').toLowerCase().match(/[a-z]+\d*-\d+|[\p{L}\p{N}]+/gu) ?? [];
+  for (const token of tokens) {
+    const stem = token.replace(DOC_PARTICLE, '');
+    const word = stem.length >= 2 ? stem : token;
+    words.add(word);
+    for (const run of word.match(/[가-힣]+/g) ?? []) {
+      for (let index = 0; index + 1 < run.length; index++) bigrams.add(run.slice(index, index + 2));
+    }
+  }
+  return { words, bigrams };
+}
+
+function overlapScore(query, text) {
+  const terms = searchTokens(text);
+  let score = 0;
+  for (const word of query.words) if (terms.words.has(word)) score += 2;
+  for (const pair of query.bigrams) if (terms.bigrams.has(pair)) score += 1;
+  return score;
+}
+
+function docSections(title, body) {
+  const sections = [];
+  let heading = title;
+  let lines = [];
+  let fence = '';
+  function flush() {
+    const text = lines.join('\n').trim();
+    if (text) sections.push({ heading, body: text });
+    lines = [];
+  }
+  for (const line of body.split(/\r?\n/)) {
+    const marker = /^ {0,3}(\x60{3,}|~{3,})/.exec(line)?.[1];
+    if (marker && !fence) fence = marker;
+    else if (fence && marker?.startsWith(fence) && line.trim() === marker) fence = '';
+    const match = !fence && /^ {0,3}#{2,3}[ \t]+(.+)$/.exec(line);
+    if (match) {
+      flush();
+      heading = match[1].replace(/[ \t]+#+[ \t]*$/, '').trim();
+    } else {
+      lines.push(line);
+    }
+  }
+  flush();
+  return sections;
+}
+
+function searchDocs(query, limit = 5) {
+  const terms = searchTokens(query);
+  if (!terms.words.size) return [];
+  const matches = [];
+  for (const { docId, title, space, body } of docSearchRows.all()) {
+    const titleScore = overlapScore(terms, title) * 2;
+    for (const section of docSections(title, body)) {
+      const headingScore = section.heading === title ? 0 : overlapScore(terms, section.heading) * 2;
+      const score = titleScore + headingScore + overlapScore(terms, section.body);
+      if (score > 0) {
+        matches.push({ docId, title, space, ...section, excerpt: section.body.slice(0, 300), score });
+      }
+    }
+  }
+  return matches.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 function seedInitialRows() {
@@ -602,8 +845,8 @@ function seedWeeklyReports(today) {
     issues: '초안 검토 중'
   };
   const emptyNext = JSON.stringify(emptyWeekPart());
-  saveReport.get(4, currentWeek, JSON.stringify(submitted), emptyNext, 'submitted', timestamp, timestamp);
-  saveReport.get(5, currentWeek, JSON.stringify(draft), emptyNext, 'draft', null, timestamp);
+  saveReport.get(4, currentWeek, JSON.stringify(submitted), emptyNext, 'submitted', timestamp, timestamp, null);
+  saveReport.get(5, currentWeek, JSON.stringify(draft), emptyNext, 'draft', null, timestamp, null);
 }
 
 function countWeekdays(start, end) {
@@ -746,7 +989,7 @@ function currentReport(user) {
   if (row) return reportObject(row);
   const previous = findWeek.get(user.id, addDays(weekStart, -7));
   const entries = previous ? JSON.parse(previous.nextJson).entries : [];
-  return { ...reportWeekFields(weekStart, emptyWeekPart(entries), emptyWeekPart()), status: 'none' };
+  return { ...reportWeekFields(weekStart, emptyWeekPart(entries), emptyWeekPart()), status: 'none', fileName: null };
 }
 
 const workdays = new Set(['mon', 'tue', 'wed', 'thu', 'fri']);
@@ -787,11 +1030,16 @@ function readWeekPart(part) {
   };
 }
 
-function putReport({ userId, weekStart, current, next, submit = false }) {
+function weeklyEmployee(userId) {
   const user = getUser(readId(userId));
   if (user.role !== 'employee') {
     throw new HttpError(403, '구성원만 개인 주간보고를 작성할 수 있습니다.');
   }
+  return user;
+}
+
+function putReport({ userId, weekStart, current, next, submit = false }) {
+  const user = weeklyEmployee(userId);
   readWeekStart(weekStart);
   if (typeof submit !== 'boolean') throw new HttpError(400, '제출 여부를 올바르게 입력해 주세요.');
   const currentPart = readWeekPart(current);
@@ -803,15 +1051,126 @@ function putReport({ userId, weekStart, current, next, submit = false }) {
   const timestamp = new Date().toISOString();
   const status = submit ? 'submitted' : 'draft';
   const saved = saveReport.get(user.id, weekStart, JSON.stringify(currentPart), JSON.stringify(nextPart),
-    status, submit ? timestamp : null, timestamp);
+    status, submit ? timestamp : null, timestamp, null);
   if (!saved) throw new HttpError(409, '제출되었거나 승인된 주간보고는 수정할 수 없습니다.');
   return reportObject(findReport.get(saved.id));
 }
 
-function decideReport(id, status, { approverId, comment }) {
-  const approver = getManager(readId(approverId));
+function getReport(id) {
   const report = findReport.get(id);
   if (!report) throw new HttpError(404, '주간보고를 찾을 수 없습니다.');
+  return report;
+}
+
+const reportFilePath = (id) => path.join(uploadsDir, `${id}.xlsx`);
+
+function replaceReportFile(file, bytes) {
+  const staged = `${file}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(staged, bytes, { flag: 'wx' });
+    fs.renameSync(staged, file);
+  } finally {
+    fs.rmSync(staged, { force: true });
+  }
+}
+
+async function uploadReport(req, query) {
+  const user = weeklyEmployee(query.get('userId'));
+  const fileName = textValue(query.get('fileName'), '주간보고 파일 이름을 입력해 주세요.', true);
+  if (!/\.xlsx$/i.test(fileName) || /[\\/\p{Cc}]/u.test(fileName)) {
+    throw new HttpError(400, '주간보고 양식을 읽을 수 없습니다: 올바른 xlsx 파일 이름이 필요합니다.');
+  }
+  const bytes = await readWorkbookBytes(req);
+  let workbook;
+  try {
+    workbook = readWeeklyWorkbook(bytes, localDate(new Date()));
+  } catch (error) {
+    throw new HttpError(400, `주간보고 양식을 읽을 수 없습니다: ${error.message}`);
+  }
+  const { weekStart, current, next, warnings } = workbook;
+  const timestamp = new Date().toISOString();
+
+  db.exec('BEGIN IMMEDIATE');
+  let file;
+  let previous;
+  let replaced = false;
+  try {
+    const saved = saveReport.get(user.id, weekStart, JSON.stringify(current), JSON.stringify(next),
+      'draft', null, timestamp, fileName);
+    if (!saved) throw new HttpError(409, '제출되었거나 승인된 주간보고는 수정할 수 없습니다.');
+    const report = reportObject(findReport.get(saved.id));
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    file = reportFilePath(saved.id);
+    if (fs.existsSync(file)) previous = fs.readFileSync(file);
+    replaceReportFile(file, bytes);
+    replaced = true;
+    db.exec('COMMIT');
+    return { report, warnings };
+  } catch (error) {
+    // DB 커밋이 실패하면 덮어썼던 원본도 복구한다.
+    try {
+      if (replaced) {
+        if (previous) replaceReportFile(file, previous);
+        else fs.rmSync(file, { force: true });
+      }
+    } finally {
+      db.exec('ROLLBACK');
+    }
+    throw error;
+  }
+}
+
+function submitReport(id, { userId }) {
+  const user = getUser(readId(userId));
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const row = getReport(id);
+    if (row.userId !== user.id) throw new HttpError(403, '본인의 주간보고만 제출할 수 있습니다.');
+    if (!['draft', 'rejected'].includes(row.status)) {
+      throw new HttpError(409, '임시저장 또는 반려된 주간보고만 제출할 수 있습니다.');
+    }
+    if (JSON.parse(row.currentJson).entries.length === 0) {
+      throw new HttpError(400, '제출하려면 금주 실적에 업무 항목을 한 개 이상 입력해 주세요.');
+    }
+    const timestamp = new Date().toISOString();
+    submitDraftReport.run(timestamp, timestamp, id);
+    const report = reportObject(findReport.get(id));
+    db.exec('COMMIT');
+    return report;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function downloadReportFile(res, id, viewerId) {
+  const viewer = getUser(readId(viewerId));
+  const report = getReport(id);
+  if (viewer.id !== report.userId && viewer.role !== 'executive' &&
+      !(viewer.role === 'manager' && viewer.team === report.team)) {
+    throw new HttpError(403, '주간보고 원본을 받을 권한이 없습니다.');
+  }
+  if (!report.fileName) throw new HttpError(404, '주간보고 원본 파일이 없습니다.');
+  let bytes;
+  try {
+    bytes = fs.readFileSync(reportFilePath(id));
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new HttpError(404, '주간보고 원본 파일이 없습니다.');
+    throw error;
+  }
+  const name = encodeURIComponent(report.fileName).replace(/['()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  res.writeHead(200, {
+    'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'Content-Length': bytes.length,
+    'Content-Disposition': `attachment; filename="weekly-report-${id}.xlsx"; filename*=UTF-8''${name}`
+  });
+  res.end(bytes);
+}
+
+function decideReport(id, status, { approverId, comment }) {
+  const approver = getManager(readId(approverId));
+  const report = getReport(id);
   requireSameTeam(approver, report.userId);
   if (report.status !== 'submitted') {
     throw new HttpError(409, '제출된 주간보고만 처리할 수 있습니다.');
@@ -1070,6 +1429,14 @@ async function handleApi(req, res, pathname, query) {
         return json(res, 200, home(user()));
       case '/api/notices':
         return json(res, 200, listNotices.all().map(noticeObject));
+      case '/api/docs':
+        return json(res, 200, listDocs.all());
+      case '/api/docs/search': {
+        const q = textValue(query.get('q'), '문서 검색어를 입력해 주세요.', true);
+        const limit = readId(query.get('limit') ?? 5);
+        return json(res, 200, searchDocs(q, limit).map(({ docId, title, space, heading, excerpt, score }) =>
+          ({ docId, title, space, heading, excerpt, score })));
+      }
       case '/api/rooms':
         return json(res, 200, listRooms.all());
       case '/api/room-reservations': {
@@ -1110,10 +1477,16 @@ async function handleApi(req, res, pathname, query) {
         return json(res, 200, approvals('mine', user().id));
     }
 
+    const doc = /^\/api\/docs\/([^/]+)$/.exec(pathname);
+    if (doc) return json(res, 200, getDoc(readId(doc[1])));
+    const reportFile = /^\/api\/weekly-reports\/([^/]+)\/file$/.exec(pathname);
+    if (reportFile) return downloadReportFile(res, readId(reportFile[1]), query.get('viewerId'));
     const match = /^\/api\/users\/([^/]+)\/balance$/.exec(pathname);
     if (match) return json(res, 200, balance(getUser(readId(match[1]))));
   }
   if (req.method === 'PUT') {
+    const doc = /^\/api\/docs\/([^/]+)$/.exec(pathname);
+    if (doc) return json(res, 200, editDoc(readId(doc[1]), await readJson(req)));
     if (pathname === '/api/weekly-reports') {
       return json(res, 200, putReport(await readJson(req)));
     }
@@ -1125,6 +1498,8 @@ async function handleApi(req, res, pathname, query) {
     switch (pathname) {
       case '/api/notices':
         return json(res, 201, createNotice(await readJson(req)));
+      case '/api/docs':
+        return json(res, 201, createDoc(await readJson(req)));
       case '/api/attendance/check-in':
         return json(res, 201, markAttendance(true, await readJson(req)));
       case '/api/attendance/check-out':
@@ -1133,6 +1508,8 @@ async function handleApi(req, res, pathname, query) {
         return json(res, 201, createLeave(await readJson(req)));
       case '/api/room-reservations':
         return json(res, 201, createReservation(await readJson(req)));
+      case '/api/weekly-reports/upload':
+        return json(res, 200, await uploadReport(req, query));
       case '/api/chat': {
         const { userId, text } = await readJson(req);
         const chatUser = getUser(readId(userId));
@@ -1146,6 +1523,7 @@ async function handleApi(req, res, pathname, query) {
           executiveWeekly: () => executiveWeekly(chatUser, null),
           rooms: () => listRooms.all(),
           reservations: (date) => listDayReservations.all(date),
+          searchDocs: (q) => searchDocs(q, 3),
           snapshot: () => chatSnapshot(chatUser),
           weeklyDraft: () => weeklyDraftData(chatUser)
         }));
@@ -1169,11 +1547,14 @@ async function handleApi(req, res, pathname, query) {
       if (action === 'cancel') return json(res, 200, cancelLeave(id, body));
       return json(res, 200, decideLeave(id, action === 'approve' ? 'approved' : 'rejected', body));
     }
-    const report = /^\/api\/weekly-reports\/([^/]+)\/(approve|reject)$/.exec(pathname);
+    const report = /^\/api\/weekly-reports\/([^/]+)\/(approve|reject|submit)$/.exec(pathname);
     if (report) {
-      const [, id, action] = report;
+      const [, rawId, action] = report;
+      const id = readId(rawId);
+      const body = await readJson(req);
+      if (action === 'submit') return json(res, 200, submitReport(id, body));
       const status = action === 'approve' ? 'approved' : 'rejected';
-      return json(res, 200, decideReport(readId(id), status, await readJson(req)));
+      return json(res, 200, decideReport(id, status, body));
     }
   }
   throw new HttpError(404, '요청한 API를 찾을 수 없습니다.');
