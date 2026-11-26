@@ -31,6 +31,48 @@
     '오늘 오후 3시 소회의실 A 1시간 예약, 제목 임원 점검',
   ];
 
+  // 탭(화면)별 문맥: 화면 이름, 그 화면에서 바로 쓸 수 있는 추천 문장, 입력 예시.
+  // 칩의 짧은 문장("내일", "초안 써줘")은 서버가 현재 화면 기준으로 해석한다.
+  const SCREEN_CONTEXT = {
+    home: {
+      label: '홈', placeholder: '예: 오늘 요약 / 공지 뭐 있어?',
+      chips: { employee: ['오늘 요약', '공지 뭐 있어?'], manager: ['오늘 요약', '결재 대기 보여줘'], executive: ['오늘 요약', '주간보고 팀별 현황 보여줘'] },
+    },
+    attendance: {
+      label: '출퇴근', placeholder: '예: 출근 / 퇴근 / 이번 달 지각 몇 번이야?',
+      chips: { employee: ['출근', '퇴근', '이번 달 지각 몇 번이야?'], manager: ['출근', '퇴근', '이번 달 지각 몇 번이야?'] },
+    },
+    leave: {
+      label: '연차', placeholder: '예: 내일 / 다음 주 월화 / 몇 개 남았어?',
+      chips: { employee: ['몇 개 남았어?', '내일', '다음 주 월화', '내일 오후 반차'], manager: ['몇 개 남았어?', '내일', '다음 주 월화'] },
+    },
+    weekly: {
+      label: '주간보고', placeholder: '예: 초안 써줘 / 월 사내 그룹웨어 7시간 화면 설계',
+      chips: { employee: ['초안 써줘', '제출했나?'], manager: ['주간보고 현황'], executive: ['주간보고 팀별 현황 보여줘'] },
+    },
+    approvals: {
+      label: '결재 관리', placeholder: '예: 보여줘 / 반려 사유가 뭐였지?',
+      chips: { employee: ['내가 올린 결재 상태', '반려 사유가 뭐였지?'], manager: ['결재 대기 보여줘'] },
+    },
+    docs: {
+      label: '문서', placeholder: '예: 회의실 이용 규정 알려줘',
+      chips: { employee: ['회의실 이용 규정 알려줘'], manager: ['회의실 이용 규정 알려줘'], executive: ['회의실 이용 규정 알려줘'] },
+    },
+    rooms: {
+      label: '회의실 예약', placeholder: '예: 현황 / 내일 오후 3시 소회의실 A 1시간 예약',
+      chips: {
+        employee: ['현황', '내일 오후 3시 소회의실 A 1시간 예약, 제목 스프린트 회의'],
+        manager: ['현황', '내일 오후 3시 소회의실 A 1시간 예약, 제목 주간 점검'],
+        executive: ['현황', '오늘 오후 3시 소회의실 A 1시간 예약, 제목 임원 점검'],
+      },
+    },
+  };
+
+  function currentScreen() {
+    const base = (window.location.hash || '#/home').replace(/^#\/?/, '').split(/[/?]/)[0];
+    return SCREEN_CONTEXT[base] ? base : 'home';
+  }
+
   // ---------- 공통 ----------
 
   function h(tag, props = {}, ...children) {
@@ -108,12 +150,18 @@
     type: 'button', className: 'cb-new', 'aria-label': '새 대화 시작', title: '새 대화 시작'
   });
   newChatBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg><span>새 대화</span>';
+  const ctxLabel = h('span', { className: 'cb-context-label' });
+  const ctxChips = h('div', { className: 'cb-context-chips' });
+  const ctxBar = h('div', { className: 'cb-context', 'aria-live': 'polite' },
+    h('div', { className: 'cb-context-head' }, h('span', { className: 'cb-context-dot', 'aria-hidden': 'true' }), ctxLabel),
+    ctxChips);
   const panel = h('section', { className: 'cb-panel', 'aria-label': '업무 도우미', hidden: '' },
     h('header', { className: 'cb-header' },
       h('div', {},
         h('strong', { text: '업무 도우미' }),
         h('span', { className: 'cb-sub', text: '연차 · 주간보고 · 출퇴근 · 결재 · 회의실' })),
       h('div', { className: 'cb-header-actions' }, newChatBtn, closeBtn)),
+    ctxBar,
     log,
     form);
 
@@ -123,6 +171,7 @@
     panel.hidden = false;
     fab.classList.add('is-open');
     if (!log.childElementCount) greet();
+    renderContext();
     input.focus();
   }
   function close() {
@@ -192,8 +241,28 @@
     log.replaceChildren();
   }
 
+  // 현재 탭에 맞춰 문맥 줄(화면 이름 + 추천 칩)과 입력 예시를 바꾼다
+  let contextSeq = 0;
+  async function renderContext() {
+    const seq = ++contextSeq;
+    const screen = currentScreen();
+    const info = SCREEN_CONTEXT[screen];
+    const user = await getCurrentUserInfo();
+    if (seq !== contextSeq) return;
+    const role = user?.role || 'employee';
+    const list = info.chips[role] ?? [];
+    ctxLabel.textContent = `지금 화면: ${info.label}`;
+    ctxChips.replaceChildren(...list.map((text) =>
+      h('button', { type: 'button', className: 'cb-chip cb-chip-sm', text, onClick: () => send(text) })));
+    ctxChips.hidden = list.length === 0;
+    input.placeholder = info.placeholder;
+  }
+
+  window.addEventListener('hashchange', () => renderContext());
+
   userSelect()?.addEventListener('change', () => {
     resetConversation();
+    renderContext();
     if (!panel.hidden) greet();
   });
 
@@ -231,7 +300,7 @@
       setTimeout(resolve, Math.max(0, minDelay - (performance.now() - started))));
 
     try {
-      const res = await api('/api/chat', { method: 'POST', body: { userId, text } })
+      const res = await api('/api/chat', { method: 'POST', body: { userId, text, screen: currentScreen() } })
         .finally(pad);
       if (mySession !== session) return;   // 그사이 새 대화를 시작했으면 무시
       typing.remove();

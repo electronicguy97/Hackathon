@@ -970,7 +970,22 @@ const INTENT_ROUTE = {
   room_status: 'rooms'
 };
 
+// 탭(화면) 문맥: 메뉴 이름이 없는 짧은 말은 지금 보고 있는 화면 기준으로 해석한다.
+// 예) 연차 화면에서 "내일" → "연차 내일", 주간보고 화면에서 "초안 써줘" → "주간보고 초안 써줘"
+const SCREEN_CONTEXT_WORD = { leave: '연차', weekly: '주간보고', rooms: '회의실', attendance: '출퇴근', approvals: '결재' };
+
+function withScreenContext(text, screen) {
+  const word = SCREEN_CONTEXT_WORD[screen];
+  if (!word || routeByKeywords(text)) return text;          // 다른 메뉴를 직접 말했으면 그대로
+  if (/(요약|안녕|도움|뭐\s*할\s*수)/.test(text)) return text;   // 전체 요약·인사·도움말은 화면과 무관
+  const before = classifyByRules(text);
+  if (!['help', 'question', 'status'].includes(before)) return text;   // 이미 의도가 분명하면 그대로
+  const augmented = `${word} ${text}`;
+  return classifyByRules(augmented) === before ? text : augmented;
+}
+
 async function respond(text, ctx, today = localToday()) {
+  text = withScreenContext(text, ctx.screen);
   const parsed = await interpret(text, today);
   if (parsed.intent === 'doc_question' || parsed.intent === 'question') {
     const matches = ctx.searchDocs?.(text) ?? [];
@@ -1151,6 +1166,7 @@ async function respondCore(text, ctx, parsed, today) {
 }
 
 module.exports = {
+  withScreenContext,
   buildWeeklyDraft,
   respond,
   writeStory,

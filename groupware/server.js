@@ -1535,12 +1535,13 @@ async function handleApi(req, res, pathname, query) {
       case '/api/weekly-reports/upload':
         return json(res, 200, await uploadReport(req, query));
       case '/api/chat': {
-        const { userId, text } = await readJson(req);
+        const { userId, text, screen } = await readJson(req);
         const chatUser = getUser(readId(userId));
         const message = textValue(text, '메시지를 입력해 주세요.', true);
         if (text.length > 500) throw new HttpError(400, '메시지는 500자 이내로 입력해 주세요.');
         return json(res, 200, await assistant.respond(message, {
           user: chatUser,
+          screen: typeof screen === 'string' ? screen : null,   // 사용자가 보고 있는 탭
           home: () => home(chatUser),
           pendingApprovals: () => approvals('pending', chatUser.team),
           teamWeekly: () => getTeamReport(chatUser, null, null),

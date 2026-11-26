@@ -329,3 +329,38 @@
 }
 .cb-new:hover { background: rgba(255, 255, 255, 0.24); }
 .cb-new:focus-visible, .cb-close:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }
+
+/* 탭(화면) 문맥 줄: 지금 보고 있는 화면 + 그 화면용 추천 문장 */
+.cb-context {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px 10px;
+  background: var(--primary-soft);
+  border-bottom: 1px solid var(--primary-border);
+}
+.cb-context-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+.cb-context-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+.cb-context-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.cb-context-chips[hidden] { display: none; }
+.cb-chip-sm {
+  padding: 3px 9px;
+  font-size: 0.76rem;
+  background: var(--surface);
+}
