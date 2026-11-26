@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>사내 그룹웨어 · 연차 신청 및 결재</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">GW</span>
+        <div class="brand-text">
+          <h1 class="brand-title">사내 그룹웨어</h1>
+          <span class="brand-subtitle">연차 · 결재</span>
+        </div>
+      </div>
+
+      <nav class="nav-tabs" role="tablist" aria-label="화면 전환">
+        <button
+          type="button"
+          id="tab-my-leave"
+          class="nav-tab is-active"
+          role="tab"
+          aria-selected="true"
+          aria-controls="section-my-leave"
+          data-tab="my-leave"
+        >
+          내 연차
+        </button>
+        <button
+          type="button"
+          id="tab-approvals"
+          class="nav-tab is-hidden"
+          role="tab"
+          aria-selected="false"
+          aria-controls="section-approvals"
+          data-tab="approvals"
+          hidden
+        >
+          결재함
+          <span id="approvals-badge" class="tab-badge is-hidden" hidden>0</span>
+        </button>
+      </nav>
+
+      <div class="user-switcher">
+        <label for="user-select" class="sr-only">사용자 전환</label>
+        <select id="user-select" class="user-select" disabled>
+          <option value="">사용자 불러오는 중...</option>
+        </select>
+        <span id="role-badge" class="role-badge is-hidden" hidden></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="global-error" class="alert alert-error is-hidden" role="alert" hidden>
+      <span id="global-error-text"></span>
+      <button type="button" id="global-retry-btn" class="btn btn-sm btn-outline">다시 시도</button>
+    </div>
+
+    <section
+      id="section-my-leave"
+      class="view-section"
+      role="tabpanel"
+      aria-labelledby="tab-my-leave"
+    >
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">내 연차 현황</h2>
+          <p id="current-user-meta" class="section-subtitle">사용자 정보를 불러오는 중입니다...</p>
+        </div>
+        <button type="button" id="focus-request-btn" class="btn btn-primary">
+          + 연차 신청
+        </button>
+      </div>
+
+      <div class="balance-grid" aria-label="연차 요약">
+        <article class="balance-card balance-card-primary">
+          <div class="balance-label">잔여 연차</div>
+          <div id="balance-remaining" class="balance-value">-</div>
+          <div id="balance-available-hint" class="balance-hint">승인 대기 차감 기준 확인</div>
+        </article>
+        <article class="balance-card">
+          <div class="balance-label">사용 연차</div>
+          <div id="balance-used" class="balance-value">-</div>
+          <div class="balance-hint">승인 완료 합계</div>
+        </article>
+        <article class="balance-card">
+          <div class="balance-label">승인 대기</div>
+          <div id="balance-pending" class="balance-value">-</div>
+          <div class="balance-hint">결재 진행 중</div>
+        </article>
+        <article class="balance-card">
+          <div class="balance-label">총 부여 연차</div>
+          <div id="balance-total" class="balance-value">-</div>
+          <div class="balance-hint">연간 기준 일수</div>
+        </article>
+      </div>
+
+      <div class="workspace-grid">
+        <section id="request-card" class="card" aria-labelledby="request-form-title">
+          <div class="card-header">
+            <h3 id="request-form-title" class="card-title">연차 신청</h3>
+            <span class="card-caption">주말 제외 평일 자동 계산</span>
+          </div>
+
+          <form id="leave-request-form" class="request-form" novalidate>
+            <div class="form-group">
+              <label for="leave-type" class="form-label">휴가 유형</label>
+              <select id="leave-type" name="type" class="form-control">
+                <option value="annual">연차 (종일)</option>
+                <option value="half_am">오전 반차 (0.5일)</option>
+                <option value="half_pm">오후 반차 (0.5일)</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="start-date" class="form-label">시작일</label>
+                <input type="date" id="start-date" name="startDate" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="end-date" class="form-label">종료일</label>
+                <input type="date" id="end-date" name="endDate" class="form-control">
+              </div>
+            </div>
+
+            <p id="half-day-hint" class="field-hint is-hidden" hidden>
+              반차는 시작일과 종료일이 동일하게 적용됩니다.
+            </p>
+
+            <div class="preview-box" aria-live="polite">
+              <span class="preview-label">예상 차감 일수</span>
+              <strong id="days-preview" class="preview-value">-</strong>
+            </div>
+
+            <div class="form-group">
+              <label for="leave-reason" class="form-label">사유</label>
+              <textarea
+                id="leave-reason"
+                name="reason"
+                rows="3"
+                class="form-control"
+                placeholder="연차 사유를 입력하세요 (예: 개인 사유, 병원 방문)"
+              ></textarea>
+            </div>
+
+            <div id="request-error" class="alert alert-error is-hidden" role="alert" hidden></div>
+
+            <div class="form-actions">
+              <button type="button" id="reset-form-btn" class="btn btn-outline">초기화</button>
+              <button type="submit" id="submit-request-btn" class="btn btn-primary">신청하기</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card" aria-labelledby="my-requests-title">
+          <div class="card-header">
+            <h3 id="my-requests-title" class="card-title">내 신청 내역</h3>
+            <span id="requests-count" class="count-pill">총 0건</span>
+          </div>
+
+          <div id="requests-loading" class="state-box is-hidden" hidden>
+            신청 내역을 불러오는 중입니다...
+          </div>
+
+          <div id="requests-empty" class="state-box is-hidden" hidden>
+            아직 신청한 연차 내역이 없습니다.
+          </div>
+
+          <div id="requests-table-wrap" class="table-wrap is-hidden" hidden>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">기간</th>
+                  <th scope="col">유형</th>
+                  <th scope="col">일수</th>
+                  <th scope="col">사유</th>
+                  <th scope="col">상태</th>
+                  <th scope="col">결재 의견</th>
+                </tr>
+              </thead>
+              <tbody id="requests-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section
+      id="section-approvals"
+      class="view-section is-hidden"
+      role="tabpanel"
+      aria-labelledby="tab-approvals"
+      hidden
+    >
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">결재함</h2>
+          <p id="approvals-subtitle" class="section-subtitle">팀원의 승인 대기 요청을 확인하고 결재합니다.</p>
+        </div>
+        <span id="approvals-count-pill" class="count-pill count-pill-accent">대기 0건</span>
+      </div>
+
+      <div id="approvals-error" class="alert alert-error is-hidden" role="alert" hidden></div>
+
+      <div id="approvals-loading" class="card state-box is-hidden" hidden>
+        결재 목록을 불러오는 중입니다...
+      </div>
+
+      <div id="approvals-empty" class="card state-box is-hidden" hidden>
+        대기 중인 결재 요청이 없습니다.
+      </div>
+
+      <div id="approvals-list" class="approvals-list"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast is-hidden" role="status" aria-live="polite" hidden>
+    <span id="toast-text"></span>
+    <button type="button" id="toast-close-btn" class="toast-close" aria-label="알림 닫기">×</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
