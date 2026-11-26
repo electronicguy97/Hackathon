@@ -9,7 +9,7 @@
   const TYPE_LABEL = { annual: '연차', half_am: '오전 반차', half_pm: '오후 반차' };
   const DAY_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri'];
   const DAY_LABEL = { mon: '월', tue: '화', wed: '수', thu: '목', fri: '금' };
-  const EXEC_ALLOWED_ROUTES = new Set(['home', 'weekly', 'rooms']);
+  const EXEC_ALLOWED_ROUTES = new Set(['home', 'weekly', 'docs', 'rooms']);
 
   const EMPLOYEE_SUGGESTIONS = [
     '오늘 요약',
@@ -212,12 +212,46 @@
       const res = await api('/api/chat', { method: 'POST', body: { userId, text } })
         .finally(pad);
       typing.remove();
-      // 관련 화면으로 먼저 전환 (출퇴근, 주간보고, 연차, 승인, 홈)
-      if (res.screen && window.location.hash !== `#/${res.screen}`) {
-        window.location.hash = `#/${res.screen}`;
+      // 관련 화면으로 먼저 전환 (출퇴근, 주간보고, 연차, 승인, 문서, 홈)
+      if (res.screen) {
+        const docId = res.docId ?? res.action?.docId;
+        const targetHash = res.screen === 'docs' && docId
+          ? `#/docs/${docId}`
+          : `#/${res.screen}`;
+        if (window.location.hash !== targetHash) {
+          if (res.screen === 'docs' && Array.isArray(res.citations) && res.citations[0]?.heading) {
+            window.__groupwareDocTargetHeading = res.citations[0].heading;
+          }
+          window.location.hash = targetHash;
+        }
       }
       const msg = say('bot', res.reply);
       if (res.warning) msg.append(h('div', { className: 'cb-note', text: res.warning }));
+      if (Array.isArray(res.citations) && res.citations.length > 0) {
+        const chipsWrap = h('div', { className: 'cb-citations' },
+          res.citations.map((c) => {
+            const label = c.heading && c.heading !== c.title
+              ? `출처: ${c.title} > ${c.heading}`
+              : `출처: ${c.title || `문서 #${c.docId}`}`;
+            return h('button', {
+              type: 'button',
+              className: 'cb-citation',
+              text: label,
+              onClick: () => {
+                window.__groupwareDocTargetHeading = c.heading || '';
+                const nextHash = `#/docs/${c.docId}`;
+                if (window.location.hash === nextHash) {
+                  refreshApp();
+                } else {
+                  window.location.hash = nextHash;
+                }
+              },
+            });
+          })
+        );
+        msg.append(chipsWrap);
+        scrollDown();
+      }
       if (res.action) await handleAction(res.action, msg);
     } catch (err) {
       typing.remove();
@@ -334,7 +368,12 @@
       if (role === 'executive' && !EXEC_ALLOWED_ROUTES.has(action.route)) {
         return;
       }
-      const go = () => { window.location.hash = `#/${action.route}`; };
+      const targetHash = action.route === 'docs' && action.docId
+        ? `#/docs/${action.docId}`
+        : `#/${action.route}`;
+      const go = () => {
+        window.location.hash = targetHash;
+      };
       if (action.auto) {
         go();
       } else {

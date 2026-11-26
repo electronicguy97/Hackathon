@@ -87,6 +87,30 @@
 
 .cb-note { font-size: 0.78rem; color: var(--text-subtle); }
 
+.cb-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.cb-citation {
+  border: 1px solid var(--primary-border);
+  background: var(--surface);
+  color: var(--primary);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
+
+.cb-citation:hover {
+  background: var(--primary-soft);
+}
+
 .cb-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .cb-chip {
   border: 1px solid var(--primary-border);

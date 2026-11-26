@@ -2,8 +2,8 @@
   'use strict';
 
   const STORAGE_KEY = 'groupware.selectedUserId';
-  const ALL_ROUTES = ['home', 'attendance', 'weekly', 'leave', 'approvals', 'rooms'];
-  const EXEC_ROUTES = ['home', 'weekly', 'rooms'];
+  const ALL_ROUTES = ['home', 'attendance', 'weekly', 'leave', 'approvals', 'docs', 'rooms'];
+  const EXEC_ROUTES = ['home', 'weekly', 'docs', 'rooms'];
 
   const DAYS = [
     { key: 'mon', label: '월' },
@@ -62,6 +62,7 @@
     leaveCalendarMonth: '',
     approvalsTab: 'pending',
     employeeWeekStart: '',
+    lastUploadResult: null,
     managerWeekStart: '',
     execWeekStart: '',
     execSelectedTeam: null,
@@ -71,6 +72,9 @@
 
   const dom = {
     userSelect: document.getElementById('user-select'),
+    userAvatar: document.getElementById('user-avatar'),
+    userDisplayName: document.getElementById('user-display-name'),
+    userDisplayRole: document.getElementById('user-display-role'),
     roleBadge: document.getElementById('role-badge'),
     navLinks: Array.from(document.querySelectorAll('.sidebar-link[data-route]')),
     navApprovalsBadge: document.getElementById('nav-approvals-badge'),
@@ -223,6 +227,147 @@
     const m = String(dt.getMonth() + 1).padStart(2, '0');
     const d = String(dt.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
+  }
+
+  function formatDotDate(isoStr) {
+    if (!isoStr) return '-';
+    const dt = new Date(isoStr);
+    if (Number.isNaN(dt.getTime())) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(isoStr));
+      return m ? `${m[1]}. ${m[2]}. ${m[3]}.` : String(isoStr).slice(0, 10);
+    }
+    const y = dt.getFullYear();
+    const m = String(dt.getMonth() + 1).padStart(2, '0');
+    const d = String(dt.getDate()).padStart(2, '0');
+    return `${y}. ${m}. ${d}.`;
+  }
+
+  function formatFileSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  const SVG_ICONS = {
+    clock: [
+      { tag: 'circle', cx: '12', cy: '12', r: '9' },
+      { tag: 'polyline', points: '12 7 12 12 15.5 14' },
+    ],
+    check: [
+      { tag: 'circle', cx: '12', cy: '12', r: '9' },
+      { tag: 'polyline', points: '8.5 12.5 11 15 16 9.5' },
+    ],
+    x: [
+      { tag: 'circle', cx: '12', cy: '12', r: '9' },
+      { tag: 'line', x1: '15', y1: '9', x2: '9', y2: '15' },
+      { tag: 'line', x1: '9', y1: '9', x2: '15', y2: '15' },
+    ],
+    upload: [
+      { tag: 'path', d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' },
+      { tag: 'polyline', points: '17 8 12 3 7 8' },
+      { tag: 'line', x1: '12', y1: '3', x2: '12', y2: '15' },
+    ],
+    download: [
+      { tag: 'path', d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' },
+      { tag: 'polyline', points: '7 10 12 15 17 10' },
+      { tag: 'line', x1: '12', y1: '15', x2: '12', y2: '3' },
+    ],
+    paperclip: [
+      { tag: 'path', d: 'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48' },
+    ],
+    file: [
+      { tag: 'path', d: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z' },
+      { tag: 'polyline', points: '14 2 14 8 20 8' },
+      { tag: 'line', x1: '8', y1: '13', x2: '16', y2: '13' },
+      { tag: 'line', x1: '8', y1: '17', x2: '13', y2: '17' },
+    ],
+    users: [
+      { tag: 'path', d: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2' },
+      { tag: 'circle', cx: '9', cy: '7', r: '4' },
+      { tag: 'path', d: 'M23 21v-2a4 4 0 0 0-3-3.87' },
+      { tag: 'path', d: 'M16 3.13a4 4 0 0 1 0 7.75' },
+    ],
+  };
+
+  function makeSvgIcon(name, { size = 18, className = '' } = {}) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    if (className) svg.setAttribute('class', className);
+    const shapes = SVG_ICONS[name] || SVG_ICONS.file;
+    for (const shape of shapes) {
+      const node = document.createElementNS(ns, shape.tag);
+      for (const [k, v] of Object.entries(shape)) {
+        if (k !== 'tag') node.setAttribute(k, String(v));
+      }
+      svg.appendChild(node);
+    }
+    return svg;
+  }
+
+  function buildStatCard({ label, count, unit = '건', valueText, hint, tone = 'indigo', icon = 'file', highlight = false }) {
+    const valNode = count !== undefined
+      ? el('div', { className: 'stat-value-row' }, [
+        el('span', { className: 'stat-value', textContent: String(count) }),
+        unit ? el('span', { className: 'stat-unit', textContent: unit }) : null,
+      ])
+      : el('div', { className: 'stat-value-row' }, [
+        el('span', { className: 'stat-value', textContent: valueText || '-' }),
+      ]);
+
+    return el('div', { className: `stat-card${highlight ? ' stat-card-primary' : ''}` }, [
+      el('div', { className: 'stat-card-top' }, [
+        el('span', { className: `stat-icon-chip is-${tone}` }, [makeSvgIcon(icon, { size: 18 })]),
+        el('span', { className: 'stat-label', textContent: label }),
+      ]),
+      valNode,
+      hint ? el('div', { className: 'stat-hint', textContent: hint }) : null,
+    ]);
+  }
+
+  function buildWeeklyDownloadLink(reportId, viewerId, { compact = false, label = '원본 다운로드' } = {}) {
+    return el('a', {
+      href: `/api/weekly-reports/${encodeURIComponent(reportId)}/file?viewerId=${encodeURIComponent(viewerId)}`,
+      download: '',
+      className: `btn ${compact ? 'btn-sm' : ''} btn-outline btn-icon-label`.trim(),
+    }, [
+      makeSvgIcon('download', { size: 15 }),
+      el('span', { textContent: label }),
+    ]);
+  }
+
+  async function uploadWeeklyReportFile(userId, file) {
+    const url = `/api/weekly-reports/upload?userId=${encodeURIComponent(userId)}&fileName=${encodeURIComponent(file.name)}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+      },
+      body: file,
+    });
+    const text = await response.text();
+    let data = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (_err) {
+        data = null;
+      }
+    }
+    if (!response.ok) {
+      const msg = (data && data.error) || `요청 처리 중 오류가 발생했습니다. (${response.status})`;
+      throw new Error(msg);
+    }
+    return data;
   }
 
   function formatWorkDateWithDay(dateStr) {
@@ -421,6 +566,9 @@
 
   function renderHeaderForUser(user) {
     if (!user) {
+      if (dom.userAvatar) dom.userAvatar.textContent = '-';
+      if (dom.userDisplayName) dom.userDisplayName.textContent = '-';
+      if (dom.userDisplayRole) dom.userDisplayRole.textContent = '-';
       setVisible(dom.roleBadge, false);
       updateNavApprovalsBadge(0);
       syncSidebarForUser(null);
@@ -430,9 +578,12 @@
       label: user.role,
       className: 'role-badge role-badge-employee',
     };
+    if (dom.userAvatar) dom.userAvatar.textContent = (user.name || '?').slice(0, 1);
+    if (dom.userDisplayName) dom.userDisplayName.textContent = user.name || '-';
+    if (dom.userDisplayRole) dom.userDisplayRole.textContent = `${roleInfo.label} · ${user.team || '-'}`;
     dom.roleBadge.textContent = roleInfo.label;
-    dom.roleBadge.className = roleInfo.className;
-    setVisible(dom.roleBadge, true);
+    dom.roleBadge.className = `${roleInfo.className} sr-only`;
+    setVisible(dom.roleBadge, false);
     if (user.role !== 'manager') updateNavApprovalsBadge(0);
     syncSidebarForUser(user);
   }
@@ -517,7 +668,10 @@
   function noticeAttachments(list) {
     if (!Array.isArray(list) || list.length === 0) return null;
     return el('div', { className: 'notice-attachments' }, list.map((a) =>
-      el('a', { className: 'notice-attachment', href: a.url, target: '_blank', rel: 'noopener' }, ['📎 ', a.name])
+      el('a', { className: 'notice-attachment', href: a.url, target: '_blank', rel: 'noopener' }, [
+        el('span', { className: 'notice-clip' }, [makeSvgIcon('paperclip', { size: 13 })]),
+        a.name,
+      ])
     ));
   }
 
@@ -719,7 +873,7 @@
       el('div', { className: 'stack-lg' }, [
         el('div', { className: 'page-header' }, [
           el('div', {}, [
-            el('h2', { className: 'page-title', textContent: '임원 홈 대시보드' }),
+            el('h2', { className: 'page-title', textContent: '임원 대시보드' }),
             el('p', { className: 'page-subtitle', textContent: `${home.today} · ${user.name} (${user.team})` }),
           ]),
           weekNav,
@@ -746,7 +900,12 @@
       return;
     }
 
-    const home = await apiFetch(`/api/home?userId=${encodeURIComponent(user.id)}`);
+    const isManager = user.role === 'manager';
+    const [home, pendingApprovals, historyApprovals] = await Promise.all([
+      apiFetch(`/api/home?userId=${encodeURIComponent(user.id)}`),
+      isManager ? apiFetch(`/api/approvals?approverId=${encodeURIComponent(user.id)}`) : Promise.resolve([]),
+      isManager ? apiFetch(`/api/approvals/history?approverId=${encodeURIComponent(user.id)}`) : Promise.resolve([]),
+    ]);
     if (seq !== state.routeSeq) return;
 
     updateNavApprovalsBadge(home.approvalPendingCount);
@@ -821,11 +980,10 @@
       }),
     ]);
 
-    const isManager = user.role === 'manager';
     const approvalsCard = el('section', { className: 'card card-clickable' }, [
       el('div', { className: 'card-header' }, [
         el('h3', { className: 'card-title', textContent: isManager ? '결재 대기' : '내 결재 현황' }),
-        el('a', { href: '#/approvals', className: 'card-link', textContent: '승인 메뉴 →' }),
+        el('a', { href: '#/approvals', className: 'card-link', textContent: '결재 관리 →' }),
       ]),
       el('div', {
         className: `kpi-value${isManager && home.approvalPendingCount > 0 ? ' kpi-value-primary' : ''}`,
@@ -847,7 +1005,7 @@
         el('a', {
           href: '#/weekly',
           className: 'card-link',
-          textContent: isManager ? '팀 종합 보기 →' : (wrEditable ? '작성하기 →' : '확인하기 →'),
+          textContent: isManager ? '팀 종합 보기 →' : (wrEditable ? '엑셀 업로드 →' : '확인하기 →'),
         }),
       ]),
       isManager
@@ -863,10 +1021,10 @@
           el('div', {
             className: 'kpi-meta',
             textContent: wr.status === 'rejected'
-              ? '반려된 보고서입니다. 의견을 확인하고 보완 후 다시 제출하세요.'
+              ? '반려된 보고서입니다. 보완한 엑셀(.xlsx) 파일을 다시 업로드해 주세요.'
               : wr.status === 'none'
-                ? '지난주 차주 계획을 바탕으로 이번 주 보고서를 작성하세요.'
-                : '주간보고 화면에서 엑셀 양식 전체를 확인할 수 있습니다.',
+                ? '사내 주간보고 엑셀(.xlsx) 파일을 업로드해 제출하세요.'
+                : '주간보고 화면에서 업로드된 양식과 원본 파일을 확인할 수 있습니다.',
           }),
         ]),
     ]);
@@ -887,21 +1045,72 @@
         )),
     ]);
 
+    let managerSummarySection = null;
+    if (isManager) {
+      const pendingItems = Array.isArray(pendingApprovals) ? pendingApprovals : [];
+      const historyItems = Array.isArray(historyApprovals) ? historyApprovals : [];
+      const approvedCount = historyItems.filter((x) => x.status === 'approved').length;
+      const rejectedCount = historyItems.filter((x) => x.status === 'rejected').length;
+      const recentItems = [...pendingItems, ...historyItems].slice(0, 5);
+      const errBox = el('div', { className: 'alert alert-error is-hidden', role: 'alert', hidden: true });
+
+      managerSummarySection = el('div', { className: 'stack-md' }, [
+        el('div', { className: 'stats-grid-3' }, [
+          buildStatCard({
+            label: '결재 대기',
+            count: pendingItems.length,
+            tone: 'amber',
+            icon: 'clock',
+            hint: '확인이 필요한 연차 · 주간보고',
+          }),
+          buildStatCard({
+            label: '승인 완료',
+            count: approvedCount,
+            tone: 'green',
+            icon: 'check',
+            hint: '처리 완료된 승인 건수',
+          }),
+          buildStatCard({
+            label: '반려',
+            count: rejectedCount,
+            tone: 'red',
+            icon: 'x',
+            hint: '보완 요청 및 반려 건수',
+          }),
+        ]),
+        el('section', { className: 'card stack-md' }, [
+          el('div', { className: 'card-header' }, [
+            el('h3', { className: 'card-title', textContent: '최근 결재 요청' }),
+            el('a', { href: '#/approvals', className: 'btn btn-sm btn-outline', textContent: '내역 보기' }),
+          ]),
+          errBox,
+          recentItems.length === 0
+            ? el('div', { className: 'state-box', textContent: '접수된 결재 요청이 없습니다.' })
+            : buildApprovalsTable(recentItems, {
+              showInlineActions: false,
+              onAfterAction: () => renderCurrentRoute(),
+              errBox,
+            }),
+        ]),
+      ]);
+    }
+
     dom.routeView.replaceChildren(
       el('div', { className: 'stack-lg' }, [
         el('div', { className: 'page-header' }, [
           el('div', {}, [
-            el('h2', { className: 'page-title', textContent: '홈 대시보드' }),
+            el('h2', { className: 'page-title', textContent: '대시보드' }),
             el('p', {
               className: 'page-subtitle',
               textContent: `${home.today} · ${user.name} (${user.team})`,
             }),
           ]),
         ]),
+        managerSummarySection,
         el('div', { className: 'home-grid' }, [
           attCard,
           leaveCard,
-          approvalsCard,
+          isManager ? null : approvalsCard,
           weeklyCard,
           buildMyMeetingsCard(home.myReservationsToday),
           absentCard,
@@ -1294,7 +1503,7 @@
       tabNextBtn.classList.toggle('is-active', activeMobileSide === 'next');
 
       const colgroup = el('colgroup', {}, [
-        el('col', { style: 'width: 64px;' }),
+        el('col', { style: 'width: 78px;' }),
         ...(showCur ? [
           el('col', { style: 'width: 112px;' }),
           el('col', { style: 'width: 82px;' }),
@@ -1531,34 +1740,194 @@
       }
     );
 
-    let mainSection = null;
-    if (!activeReport) {
-      mainSection = el('section', { className: 'card stack-md' }, [
-        el('div', { className: 'state-box', textContent: `${formatWeekLabel(activeWeek)}에 작성된 주간보고가 없습니다.` }),
-        el('div', { className: 'form-actions' }, [
-          el('button', {
-            type: 'button',
-            className: 'btn btn-primary',
-            textContent: '이번 주 보고서로 이동',
-            onClick: () => {
-              state.employeeWeekStart = thisWeekStart;
-              renderCurrentRoute();
-            },
-          }),
+    const uploadErrBox = el('div', { className: 'alert alert-error is-hidden', role: 'alert', hidden: true });
+    const fileInput = el('input', {
+      type: 'file',
+      accept: '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      className: 'sr-only',
+    });
+    const selectedFileInfo = el('div', { className: 'upload-file-meta is-hidden', hidden: true });
+    const progressWrap = el('div', { className: 'stack-sm is-hidden', hidden: true }, [
+      el('div', { className: 'page-subtitle', textContent: '엑셀 파일을 분석하여 주간보고로 변환하는 중...' }),
+      el('div', { className: 'upload-progress-track' }, [
+        el('div', { className: 'upload-progress-fill' }),
+      ]),
+    ]);
+    const pickBtn = el('button', {
+      type: 'button',
+      className: 'btn btn-primary btn-sm',
+      textContent: '엑셀(.xlsx) 파일 선택',
+      onClick: (e) => {
+        e.stopPropagation();
+        fileInput.click();
+      },
+    });
+    const dropzone = el('div', {
+      className: 'upload-dropzone',
+      role: 'button',
+      tabIndex: 0,
+      'aria-label': '주간보고 엑셀 파일 업로드 영역',
+    }, [
+      el('span', { className: 'upload-icon-chip' }, [makeSvgIcon('upload', { size: 22 })]),
+      el('p', { className: 'upload-title', textContent: '사내 주간보고 엑셀(.xlsx) 파일을 드래그하거나 클릭하여 업로드하세요' }),
+      el('p', {
+        className: 'upload-desc',
+        textContent: '최대 2MB · 임시저장 또는 반려 상태에서는 새 파일 업로드 시 기존 내용이 덮어쓰기됩니다.',
+      }),
+      el('div', { style: 'margin-top:0.35rem;' }, [pickBtn]),
+      fileInput,
+    ]);
+
+    let isUploading = false;
+    const handleFileUpload = async (file) => {
+      if (!file || isUploading) return;
+      setInlineAlert(uploadErrBox, '');
+      if (!/\.xlsx$/i.test(file.name)) {
+        setInlineAlert(uploadErrBox, '확장자가 .xlsx인 엑셀 파일만 업로드할 수 있습니다.');
+        return;
+      }
+      if (file.size === 0 || file.size > 2 * 1024 * 1024) {
+        setInlineAlert(uploadErrBox, '파일 크기는 1바이트 이상 2MB 이하만 업로드할 수 있습니다.');
+        return;
+      }
+
+      isUploading = true;
+      dropzone.classList.add('is-uploading');
+      pickBtn.disabled = true;
+      selectedFileInfo.replaceChildren(
+        el('span', { className: 'upload-file-name' }, [
+          makeSvgIcon('file', { size: 16 }),
+          el('span', { textContent: file.name }),
         ]),
+        el('span', { className: 'page-subtitle', textContent: formatFileSize(file.size) })
+      );
+      setVisible(selectedFileInfo, true);
+      setVisible(progressWrap, true);
+
+      try {
+        const result = await uploadWeeklyReportFile(user.id, file);
+        const uploadedReport = result && result.report ? result.report : result;
+        const warnings = result && Array.isArray(result.warnings) ? result.warnings : [];
+        state.lastUploadResult = {
+          reportId: uploadedReport?.id,
+          weekStart: uploadedReport?.weekStart,
+          fileName: uploadedReport?.fileName || file.name,
+          warnings,
+        };
+        if (uploadedReport?.weekStart) {
+          state.employeeWeekStart = uploadedReport.weekStart;
+        }
+        showToast('주간보고 엑셀 파일이 업로드되었습니다.');
+        await renderCurrentRoute();
+      } catch (err) {
+        setInlineAlert(uploadErrBox, err.message);
+      } finally {
+        isUploading = false;
+        dropzone.classList.remove('is-uploading');
+        pickBtn.disabled = false;
+        setVisible(progressWrap, false);
+        fileInput.value = '';
+      }
+    };
+
+    dropzone.addEventListener('click', () => {
+      if (!isUploading) fileInput.click();
+    });
+    dropzone.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && !isUploading) {
+        e.preventDefault();
+        fileInput.click();
+      }
+    });
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files && fileInput.files[0];
+      if (f) handleFileUpload(f);
+    });
+    dropzone.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('is-dragover');
+    });
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('is-dragover');
+    });
+    dropzone.addEventListener('dragleave', (e) => {
+      if (!dropzone.contains(e.relatedTarget)) {
+        dropzone.classList.remove('is-dragover');
+      }
+    });
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('is-dragover');
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) handleFileUpload(f);
+    });
+
+    const uploadCard = el('section', { className: 'card stack-md' }, [
+      el('div', { className: 'card-header' }, [
+        el('div', { className: 'approval-summary-left' }, [
+          el('h3', { className: 'card-title', textContent: '주간보고 엑셀 업로드' }),
+          makeBadge('.xlsx 전용 · 최대 2MB', 'badge badge-neutral'),
+        ]),
+        activeReport && activeReport.fileName
+          ? buildWeeklyDownloadLink(activeReport.id, user.id, { compact: true, label: `현재 파일: ${activeReport.fileName}` })
+          : null,
+      ]),
+      dropzone,
+      selectedFileInfo,
+      progressWrap,
+      uploadErrBox,
+    ]);
+
+    const uploadWarnings = (
+      state.lastUploadResult &&
+      activeReport &&
+      (state.lastUploadResult.reportId === activeReport.id || state.lastUploadResult.weekStart === activeReport.weekStart)
+    )
+      ? state.lastUploadResult.warnings
+      : [];
+
+    let mainSection = null;
+    if (!activeReport || activeReport.status === 'none') {
+      mainSection = el('section', { className: 'card stack-md' }, [
+        el('div', { className: 'card-header' }, [
+          el('div', { className: 'approval-summary-left' }, [
+            el('h3', { className: 'card-title', textContent: activeReport?.weekLabel || formatWeekLabel(activeWeek) }),
+            makeStatusBadge('none'),
+          ]),
+        ]),
+        el('div', {
+          className: 'state-box',
+          textContent: `${formatWeekLabel(activeWeek)}에 업로드된 주간보고가 없습니다. 위 영역에 .xlsx 파일을 업로드하면 2단 미리보기가 표시됩니다.`,
+        }),
+        activeWeek !== thisWeekStart
+          ? el('div', { className: 'form-actions' }, [
+            el('button', {
+              type: 'button',
+              className: 'btn btn-outline',
+              textContent: '이번 주 보고서로 이동',
+              onClick: () => {
+                state.employeeWeekStart = thisWeekStart;
+                renderCurrentRoute();
+              },
+            }),
+          ])
+          : null,
       ]);
     } else {
-      const editable = activeReport.status !== 'submitted' && activeReport.status !== 'approved';
-      const prefilledHint = activeReport.status === 'none' && activeReport.current?.entries?.length > 0
-        ? el('div', {
-          className: 'alert alert-info',
-          textContent: '지난주 차주 계획 항목이 금주 실적에 자동으로 채워졌습니다. 실적·차주 계획·이슈를 수정한 뒤 저장 또는 제출하세요.',
-        })
+      const canSubmit = activeReport.status === 'draft' || activeReport.status === 'rejected';
+      const warningBanner = uploadWarnings.length > 0
+        ? el('div', { className: 'alert alert-warning' }, [
+          el('div', { className: 'stack-sm' }, [
+            el('strong', { textContent: `파싱 경고 (${uploadWarnings.length}건)` }),
+            el('ul', { className: 'list-clean' }, uploadWarnings.map((w) => el('li', { textContent: `· ${w}` }))),
+          ]),
+        ])
         : null;
       const rejectionBanner = activeReport.status === 'rejected'
         ? el('div', {
           className: 'alert alert-warning',
-          textContent: `반려 의견 (${activeReport.approverName || '팀장'}): ${activeReport.comment || '보완 후 재제출해 주세요.'}`,
+          textContent: `반려 의견 (${activeReport.approverName || '팀장'}): ${activeReport.comment || '보완한 엑셀 파일을 다시 업로드해 제출해 주세요.'}`,
         })
         : null;
       const approvedBanner = activeReport.status === 'approved' && activeReport.comment
@@ -1567,32 +1936,66 @@
           textContent: `승인 의견 (${activeReport.approverName || '팀장'}): ${activeReport.comment}`,
         })
         : null;
-      const lockedBanner = !editable
+      const lockedBanner = !canSubmit
         ? el('div', {
           className: 'alert alert-info',
-          textContent: '제출 또는 승인 완료된 보고서는 읽기 전용입니다.',
+          textContent: '제출 또는 승인 완료된 보고서는 읽기 전용이며 재업로드할 수 없습니다.',
         })
         : null;
+
+      const submitErrBox = el('div', { className: 'alert alert-error is-hidden', role: 'alert', hidden: true });
+      const actionNodes = [];
+      if (activeReport.fileName && activeReport.id) {
+        actionNodes.push(buildWeeklyDownloadLink(activeReport.id, user.id));
+      }
+      if (canSubmit && activeReport.id) {
+        const submitBtn = el('button', {
+          type: 'button',
+          className: 'btn btn-primary',
+          textContent: activeReport.status === 'rejected' ? '수정 파일 제출하기' : '제출하기',
+        });
+        submitBtn.addEventListener('click', async () => {
+          setInlineAlert(submitErrBox, '');
+          submitBtn.disabled = true;
+          submitBtn.textContent = '제출 중...';
+          try {
+            await apiFetch(`/api/weekly-reports/${encodeURIComponent(activeReport.id)}/submit`, {
+              method: 'POST',
+              body: JSON.stringify({ userId: user.id }),
+            });
+            state.lastUploadResult = null;
+            showToast('주간보고가 제출되었습니다.');
+            await renderCurrentRoute();
+          } catch (err) {
+            setInlineAlert(submitErrBox, err.message);
+            submitBtn.disabled = false;
+            submitBtn.textContent = activeReport.status === 'rejected' ? '수정 파일 제출하기' : '제출하기';
+          }
+        });
+        actionNodes.push(submitBtn);
+      }
 
       mainSection = el('section', { className: 'card stack-md' }, [
         el('div', { className: 'card-header' }, [
           el('div', { className: 'approval-summary-left' }, [
             el('h3', { className: 'card-title', textContent: activeReport.weekLabel || formatWeekLabel(activeReport.weekStart) }),
             makeStatusBadge(activeReport.status),
+            activeReport.fileName
+              ? makeBadge(activeReport.fileName, 'badge badge-neutral')
+              : null,
           ]),
           el('span', {
             className: 'page-subtitle',
-            textContent: activeReport.updatedAt ? `최근 저장: ${formatIsoDate(activeReport.updatedAt)}` : '신규 작성',
+            textContent: activeReport.updatedAt ? `업데이트: ${formatIsoDate(activeReport.updatedAt)}` : '',
           }),
         ]),
-        prefilledHint,
+        warningBanner,
         rejectionBanner,
         approvedBanner,
         lockedBanner,
-        buildExcelWeeklyForm(activeReport, {
-          editable,
-          onSaveSuccess: () => renderCurrentRoute(),
-        }),
+        buildExcelWeeklyForm(activeReport, { editable: false }),
+        submitErrBox,
+        actionNodes.length > 0 ? el('div', { className: 'form-actions' }, actionNodes) : null,
       ]);
     }
 
@@ -1602,37 +2005,51 @@
         makeBadge(`총 ${reports.length}건`, 'badge badge-neutral'),
       ]),
       reports.length === 0
-        ? el('div', { className: 'state-box', textContent: '작성된 주간보고 내역이 없습니다.' })
+        ? el('div', { className: 'state-box', textContent: '업로드된 주간보고 내역이 없습니다.' })
         : el('div', { className: 'table-wrap' }, [
           el('table', { className: 'data-table' }, [
             el('thead', {}, [
               el('tr', {}, [
                 el('th', { textContent: '주차' }),
+                el('th', { textContent: '파일명' }),
                 el('th', { textContent: '금주 시간' }),
                 el('th', { textContent: '차주 시간' }),
                 el('th', { textContent: '상태' }),
                 el('th', { textContent: '결재 의견' }),
-                el('th', { textContent: '열람' }),
+                el('th', { textContent: '열람 · 파일' }),
               ]),
             ]),
             el('tbody', {}, reports.map((rep) =>
               el('tr', {}, [
                 el('td', {}, [el('strong', { textContent: rep.weekLabel || formatWeekLabel(rep.weekStart) })]),
+                el('td', { textContent: rep.fileName || '-' }),
                 el('td', { textContent: formatHours(rep.totalHours) }),
                 el('td', { textContent: formatHours(rep.nextTotalHours) }),
                 el('td', {}, [makeStatusBadge(rep.status)]),
                 el('td', { textContent: rep.comment || '-' }),
                 el('td', {}, [
-                  el('button', {
-                    type: 'button',
-                    className: 'btn btn-sm btn-outline',
-                    textContent: '양식 보기',
-                    onClick: () => openModal(
-                      `${rep.userName || user.name} · ${rep.weekLabel || formatWeekLabel(rep.weekStart)}`,
-                      buildExcelWeeklyForm(rep, { editable: false }),
-                      { wide: true }
-                    ),
-                  }),
+                  el('div', { className: 'table-actions' }, [
+                    el('button', {
+                      type: 'button',
+                      className: 'btn btn-sm btn-outline',
+                      textContent: '양식 보기',
+                      onClick: () => openModal(
+                        `${rep.userName || user.name} · ${rep.weekLabel || formatWeekLabel(rep.weekStart)}`,
+                        el('div', { className: 'stack-md' }, [
+                          rep.fileName && rep.id
+                            ? el('div', { className: 'approval-summary-left' }, [
+                              buildWeeklyDownloadLink(rep.id, user.id, { compact: true }),
+                            ])
+                            : null,
+                          buildExcelWeeklyForm(rep, { editable: false }),
+                        ]),
+                        { wide: true }
+                      ),
+                    }),
+                    rep.fileName && rep.id
+                      ? buildWeeklyDownloadLink(rep.id, user.id, { compact: true, label: '다운로드' })
+                      : null,
+                  ]),
                 ]),
               ])
             )),
@@ -1645,10 +2062,11 @@
         el('div', { className: 'page-header' }, [
           el('div', {}, [
             el('h2', { className: 'page-title', textContent: '주간보고' }),
-            el('p', { className: 'page-subtitle', textContent: `${user.name} · ${user.team}` }),
+            el('p', { className: 'page-subtitle', textContent: `${user.name} · ${user.team} · 엑셀(.xlsx) 업로드 및 제출` }),
           ]),
           weekNav,
         ]),
+        uploadCard,
         mainSection,
         pastCard,
       ])
@@ -1665,6 +2083,9 @@
       el('div', { className: 'approval-summary-left' }, [
         makeStatusBadge(rep.status),
         el('span', { className: 'page-subtitle', textContent: `금주 ${formatHours(rep.totalHours)} · 차주 ${formatHours(rep.nextTotalHours)}` }),
+        rep.fileName && rep.id && state.currentUser
+          ? buildWeeklyDownloadLink(rep.id, state.currentUser.id, { compact: true })
+          : null,
         rep.comment ? el('span', { className: 'page-subtitle', textContent: `결재 의견: ${rep.comment}` }) : null,
       ]),
       buildExcelWeeklyForm(rep, { editable: false }),
@@ -1729,26 +2150,36 @@
     const schedules = Array.isArray(teamData.personalSchedules) ? teamData.personalSchedules : [];
 
     const statsRow = el('div', { className: readOnly ? 'stats-grid-3' : 'stats-grid-4' }, [
-      el('div', { className: 'stat-card' }, [
-        el('div', { className: 'stat-label', textContent: '대상 팀원' }),
-        el('div', { className: 'stat-value', textContent: `${stats.memberCount}명` }),
-        el('div', { className: 'stat-hint', textContent: `팀장: ${teamData.managerName || '-'}` }),
-      ]),
-      el('div', { className: 'stat-card stat-card-primary' }, [
-        el('div', { className: 'stat-label', textContent: '제출 · 승인' }),
-        el('div', { className: 'stat-value', textContent: `${stats.submittedCount} / ${stats.memberCount}명` }),
-        el('div', { className: 'stat-hint', textContent: `승인 완료: ${stats.approvedCount}명` }),
-      ]),
-      el('div', { className: 'stat-card' }, [
-        el('div', { className: 'stat-label', textContent: '팀 총 투입 시간' }),
-        el('div', { className: 'stat-value', textContent: formatHours(stats.totalHours) }),
-        el('div', { className: 'stat-hint', textContent: '제출·승인 보고 기준' }),
-      ]),
+      buildStatCard({
+        label: '대상 팀원',
+        count: stats.memberCount,
+        unit: '명',
+        tone: 'indigo',
+        icon: 'users',
+        hint: `팀장: ${teamData.managerName || '-'}`,
+      }),
+      buildStatCard({
+        label: '제출 · 승인',
+        valueText: `${stats.submittedCount} / ${stats.memberCount}명`,
+        unit: '',
+        tone: 'green',
+        icon: 'check',
+        hint: `승인 완료: ${stats.approvedCount}명`,
+        highlight: true,
+      }),
+      buildStatCard({
+        label: '팀 총 투입 시간',
+        valueText: formatHours(stats.totalHours),
+        unit: '',
+        tone: 'amber',
+        icon: 'clock',
+        hint: '제출·승인 보고 기준',
+      }),
       !readOnly
         ? el('div', { className: 'stat-card' }, [
           el('div', { className: 'stat-label', textContent: '결재함 이동' }),
-          el('div', { style: 'margin-top:0.55rem;' }, [
-            el('a', { href: '#/approvals', className: 'btn btn-sm btn-primary', textContent: '승인 화면 바로가기 →' }),
+          el('div', { style: 'margin-top:0.7rem;' }, [
+            el('a', { href: '#/approvals', className: 'btn btn-sm btn-primary', textContent: '결재 관리 바로가기 →' }),
           ]),
           el('div', { className: 'stat-hint', textContent: '연차·주간보고 통합 결재' }),
         ])
@@ -2364,19 +2795,30 @@
 
   function renderApprovalDetail(item) {
     const d = item.detail || {};
+    const viewerId = state.currentUser?.id;
     if (item.kind === 'weekly') {
+      const reportId = d.id || item.id;
       const box = el('div', { className: 'approval-detail-box' }, [
         el('div', { className: 'approval-summary-left' }, [
           el('strong', { textContent: `${d.userName || item.userName} · ${d.weekLabel || formatWeekLabel(d.weekStart)}` }),
           el('span', { className: 'page-subtitle', textContent: `금주 ${formatHours(d.totalHours)} · 차주 ${formatHours(d.nextTotalHours)}` }),
+          d.fileName ? makeBadge(d.fileName, 'badge badge-neutral') : null,
+          d.fileName && reportId && viewerId
+            ? buildWeeklyDownloadLink(reportId, viewerId, { compact: true })
+            : null,
           d.comment ? el('span', { className: 'page-subtitle', textContent: `결재 의견: ${d.comment}` }) : null,
         ]),
         buildExcelWeeklyForm(d, { editable: false }),
       ]);
-      if (item.status === 'rejected' && item.userId === state.currentUser?.id) {
+      if (item.status === 'rejected' && item.userId === viewerId) {
         box.appendChild(
           el('div', { className: 'form-actions' }, [
-            el('a', { href: '#/weekly', className: 'btn btn-sm btn-primary', textContent: '주간보고 수정 · 재제출하기 →' }),
+            el('a', {
+              href: '#/weekly',
+              className: 'btn btn-sm btn-primary',
+              textContent: '보완 파일 다시 업로드 · 제출 →',
+              onClick: () => closeModal(),
+            }),
           ])
         );
       }
@@ -2403,7 +2845,7 @@
         ]),
         el('div', {}, [
           el('div', { className: 'detail-kv-label', textContent: '신청일' }),
-          el('div', { className: 'detail-kv-value', textContent: formatIsoDate(item.createdAt) }),
+          el('div', { className: 'detail-kv-value', textContent: formatDotDate(item.createdAt) }),
         ]),
         d.comment
           ? el('div', {}, [
@@ -2415,84 +2857,114 @@
     ]);
   }
 
-  function buildApprovalItemCard(item, { canDecide, onAfterAction, pageErrBox }) {
-    const kindLabel = item.kind === 'weekly' ? '주간보고' : '연차';
-    const kindBadgeClass = item.kind === 'weekly' ? 'badge badge-submitted' : 'badge badge-pinned';
-    let detailPanel = null;
-    let isExpanded = false;
+  async function submitApprovalDecision(item, action, comment) {
+    const base = item.kind === 'weekly' ? '/api/weekly-reports' : '/api/leave-requests';
+    await apiFetch(`${base}/${encodeURIComponent(item.id)}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        approverId: state.currentUser.id,
+        comment: comment || '',
+      }),
+    });
+  }
 
-    const detailSlot = el('div', { className: 'is-hidden', hidden: true });
-    const chevron = el('span', { className: 'card-link', textContent: '상세 보기 ▾' });
-
-    const toggleDetail = () => {
-      isExpanded = !isExpanded;
-      if (isExpanded && !detailPanel) {
-        detailPanel = renderApprovalDetail(item);
-        detailSlot.replaceChildren(detailPanel);
-      }
-      setVisible(detailSlot, isExpanded);
-      chevron.textContent = isExpanded ? '접기 ▴' : '상세 보기 ▾';
-    };
-
-    const summaryBtn = el('button', {
+  function openRejectCommentModal(item, onAfterAction) {
+    const errBox = el('div', { className: 'alert alert-error is-hidden', role: 'alert', hidden: true });
+    const commentInput = el('textarea', {
+      className: 'form-control',
+      rows: 3,
+      placeholder: item.kind === 'weekly'
+        ? '반려 사유를 입력하세요 (주간보고 반려 시 필수)'
+        : '반려 사유를 입력하세요 (선택)',
+    });
+    const cancelBtn = el('button', {
       type: 'button',
-      className: 'approval-summary-btn',
-      onClick: toggleDetail,
-    }, [
-      el('div', { className: 'approval-summary-left' }, [
-        makeBadge(kindLabel, kindBadgeClass),
-        el('span', { className: 'approval-summary-title', textContent: `${item.userName} · ${item.title}` }),
-        makeStatusBadge(item.status),
-      ]),
-      el('div', { className: 'approval-summary-right' }, [
-        el('span', {
-          textContent: item.decidedAt
-            ? `처리 ${formatIsoDate(item.decidedAt)}`
-            : `신청 ${formatIsoDate(item.createdAt)}`,
-        }),
-        chevron,
+      className: 'btn btn-outline',
+      textContent: '취소',
+      onClick: () => closeModal(),
+    });
+    const confirmBtn = el('button', {
+      type: 'button',
+      className: 'btn btn-reject',
+      textContent: '반려 확정',
+    });
+
+    confirmBtn.addEventListener('click', async () => {
+      const comment = commentInput.value.trim();
+      setInlineAlert(errBox, '');
+      if (item.kind === 'weekly' && !comment) {
+        setInlineAlert(errBox, '주간보고 반려 시 결재 의견을 입력해 주세요.');
+        commentInput.focus();
+        return;
+      }
+      confirmBtn.disabled = true;
+      cancelBtn.disabled = true;
+      commentInput.disabled = true;
+      try {
+        await submitApprovalDecision(item, 'reject', comment);
+        closeModal();
+        showToast('반려 처리되었습니다.');
+        await onAfterAction();
+      } catch (err) {
+        setInlineAlert(errBox, err.message);
+        confirmBtn.disabled = false;
+        cancelBtn.disabled = false;
+        commentInput.disabled = false;
+      }
+    });
+
+    openModal(`${item.userName} · ${item.kind === 'weekly' ? '주간보고' : '연차'} 반려`, [
+      el('div', { className: 'form-stack' }, [
+        el('p', { className: 'page-subtitle', textContent: item.title || '-' }),
+        el('div', { className: 'form-group' }, [
+          el('label', { className: 'form-label', textContent: '반려 의견' }),
+          commentInput,
+        ]),
+        errBox,
+        el('div', { className: 'form-actions' }, [cancelBtn, confirmBtn]),
       ]),
     ]);
+  }
 
-    const detailComment = item.detail && item.detail.comment;
-    const inlineOpinion = !canDecide && detailComment
-      ? el('div', {
-        className: `alert ${item.status === 'rejected' ? 'alert-warning' : 'alert-info'}`,
-        textContent: `결재 의견 (${item.detail.approverName || '팀장'}): ${detailComment}`,
-      })
-      : null;
+  function openApprovalDetailModal(item, { canDecide, onAfterAction }) {
+    const kindLabel = item.kind === 'weekly' ? '주간보고' : '연차';
+    const contentNodes = [
+      el('div', { className: 'approval-summary-left' }, [
+        makeBadge(kindLabel, item.kind === 'weekly' ? 'badge badge-submitted' : 'badge badge-pinned'),
+        makeStatusBadge(item.status),
+        el('span', { className: 'page-subtitle', textContent: `신청일 ${formatDotDate(item.createdAt)}` }),
+      ]),
+      renderApprovalDetail(item),
+    ];
 
-    let actionRow = null;
     if (canDecide) {
+      const errBox = el('div', { className: 'alert alert-error is-hidden', role: 'alert', hidden: true });
       const commentInput = el('input', {
         type: 'text',
         className: 'form-control approval-comment-input',
-        placeholder: item.kind === 'weekly'
-          ? '결재 의견 입력 (주간보고 반려 시 필수)'
-          : '결재 의견을 입력하세요 (선택)',
-        'aria-label': `${item.userName} ${item.title} 결재 의견`,
+        placeholder: item.kind === 'weekly' ? '결재 의견 입력 (주간보고 반려 시 필수)' : '결재 의견 입력 (선택)',
       });
       const rejectBtn = el('button', { type: 'button', className: 'btn btn-reject', textContent: '반려' });
-      const approveBtn = el('button', { type: 'button', className: 'btn btn-approve', textContent: '승인' });
+      const approveBtn = el('button', { type: 'button', className: 'btn btn-primary', textContent: '승인' });
 
       const decide = async (action) => {
-        setInlineAlert(pageErrBox, '');
+        const comment = commentInput.value.trim();
+        setInlineAlert(errBox, '');
+        if (action === 'reject' && item.kind === 'weekly' && !comment) {
+          setInlineAlert(errBox, '주간보고 반려 시 결재 의견을 입력해 주세요.');
+          commentInput.focus();
+          return;
+        }
         approveBtn.disabled = true;
         rejectBtn.disabled = true;
         commentInput.disabled = true;
-        const base = item.kind === 'weekly' ? '/api/weekly-reports' : '/api/leave-requests';
         try {
-          await apiFetch(`${base}/${encodeURIComponent(item.id)}/${action}`, {
-            method: 'POST',
-            body: JSON.stringify({
-              approverId: state.currentUser.id,
-              comment: commentInput.value.trim(),
-            }),
-          });
+          await submitApprovalDecision(item, action, comment);
+          closeModal();
           showToast(action === 'approve' ? '승인 처리되었습니다.' : '반려 처리되었습니다.');
           await onAfterAction();
         } catch (err) {
-          setInlineAlert(pageErrBox, err.message);
+          setInlineAlert(errBox, err.message);
           approveBtn.disabled = false;
           rejectBtn.disabled = false;
           commentInput.disabled = false;
@@ -2501,21 +2973,127 @@
 
       approveBtn.addEventListener('click', () => decide('approve'));
       rejectBtn.addEventListener('click', () => decide('reject'));
-      actionRow = el('div', { className: 'approval-actions-row' }, [commentInput, rejectBtn, approveBtn]);
+
+      contentNodes.push(
+        errBox,
+        el('div', { className: 'approval-actions-row' }, [commentInput, rejectBtn, approveBtn])
+      );
     }
 
-    const employeeRejectedAction = !canDecide && item.kind === 'weekly' && item.status === 'rejected'
-      ? el('div', { className: 'form-actions' }, [
-        el('a', { href: '#/weekly', className: 'btn btn-sm btn-primary', textContent: '주간보고 수정 · 재제출 →' }),
-      ])
-      : null;
+    openModal(
+      `${item.userName} · ${kindLabel} 상세`,
+      contentNodes,
+      { wide: item.kind === 'weekly' }
+    );
+  }
 
-    return el('article', { className: 'approval-card' }, [
-      summaryBtn,
-      inlineOpinion,
-      detailSlot,
-      actionRow,
-      employeeRejectedAction,
+  function formatApprovalRowMeta(item) {
+    const d = item.detail || {};
+    if (item.kind === 'weekly') {
+      const periodText = d.weekLabel || formatWeekLabel(d.weekStart);
+      const amountText = `금주 ${formatHours(d.totalHours)}`;
+      const parts = [`차주 ${formatHours(d.nextTotalHours)}`];
+      if (d.fileName) parts.push(d.fileName);
+      if (d.comment) parts.push(`의견: ${d.comment}`);
+      return {
+        kindLabel: '주간보고',
+        kindClass: 'badge badge-submitted',
+        periodText,
+        amountText,
+        summaryText: parts.join(' · '),
+      };
+    }
+
+    const periodText = formatPeriod(d.startDate, d.endDate);
+    const typeLabel = LEAVE_TYPE_LABELS[d.type] || d.type || '휴가';
+    const amountText = `${typeLabel} · ${formatDays(d.days)}`;
+    const summaryParts = [d.reason || '-'];
+    if (d.comment) summaryParts.push(`의견: ${d.comment}`);
+    return {
+      kindLabel: '연차',
+      kindClass: 'badge badge-pinned',
+      periodText,
+      amountText,
+      summaryText: summaryParts.join(' · '),
+    };
+  }
+
+  function buildApprovalsTable(items, { showInlineActions = false, onAfterAction, errBox }) {
+    return el('div', { className: 'table-wrap' }, [
+      el('table', { className: 'data-table' }, [
+        el('thead', {}, [
+          el('tr', {}, [
+            el('th', { textContent: '신청 직원' }),
+            el('th', { textContent: '종류' }),
+            el('th', { textContent: '기간 / 주차' }),
+            el('th', { textContent: '일수 / 시간' }),
+            el('th', { textContent: '사유 / 요약' }),
+            el('th', { textContent: '상태' }),
+            el('th', { textContent: '처리' }),
+          ]),
+        ]),
+        el('tbody', {}, items.map((item) => {
+          const meta = formatApprovalRowMeta(item);
+          const isPending = item.status === 'pending' || item.status === 'submitted';
+          const canDecideRow = showInlineActions && isPending;
+
+          const actionButtons = [
+            el('button', {
+              type: 'button',
+              className: 'btn btn-sm btn-outline',
+              textContent: '상세',
+              onClick: () => openApprovalDetailModal(item, {
+                canDecide: showInlineActions && isPending,
+                onAfterAction,
+              }),
+            }),
+          ];
+
+          if (canDecideRow) {
+            const approveBtn = el('button', {
+              type: 'button',
+              className: 'btn btn-sm btn-primary',
+              textContent: '승인',
+            });
+            const rejectBtn = el('button', {
+              type: 'button',
+              className: 'btn btn-sm btn-outline',
+              textContent: '반려',
+            });
+            approveBtn.addEventListener('click', async () => {
+              setInlineAlert(errBox, '');
+              approveBtn.disabled = true;
+              rejectBtn.disabled = true;
+              try {
+                await submitApprovalDecision(item, 'approve', '');
+                showToast('승인 처리되었습니다.');
+                await onAfterAction();
+              } catch (err) {
+                setInlineAlert(errBox, err.message);
+                approveBtn.disabled = false;
+                rejectBtn.disabled = false;
+              }
+            });
+            rejectBtn.addEventListener('click', () => openRejectCommentModal(item, onAfterAction));
+            actionButtons.push(approveBtn, rejectBtn);
+          }
+
+          return el('tr', {}, [
+            el('td', {}, [
+              el('div', { className: 'cell-stack' }, [
+                el('span', { className: 'cell-primary', textContent: item.userName || '-' }),
+                el('span', { className: 'cell-secondary', textContent: `신청일 ${formatDotDate(item.createdAt)}` }),
+              ]),
+            ]),
+            el('td', {}, [makeBadge(meta.kindLabel, meta.kindClass)]),
+            el('td', { textContent: meta.periodText }),
+            el('td', { textContent: meta.amountText }),
+            el('td', { className: 'cell-reason', textContent: meta.summaryText }),
+            el('td', {}, [makeStatusBadge(item.status)]),
+            el('td', {}, [el('div', { className: 'table-actions' }, actionButtons)]),
+          ]);
+        })),
+      ]),
     ]);
   }
 
@@ -2533,56 +3111,104 @@
 
       const pending = Array.isArray(pendingList) ? pendingList : [];
       const history = Array.isArray(historyList) ? historyList : [];
+      const approvedList = history.filter((x) => x.status === 'approved');
+      const rejectedList = history.filter((x) => x.status === 'rejected');
+      const allItems = [...pending, ...history];
       updateNavApprovalsBadge(pending.length);
 
-      const activeTab = state.approvalsTab === 'history' ? 'history' : 'pending';
-      const items = activeTab === 'pending' ? pending : history;
+      const filterKey = ['pending', 'all', 'approved', 'rejected'].includes(state.approvalsTab)
+        ? state.approvalsTab
+        : 'pending';
 
-      const tabsEl = el('div', { className: 'subtabs', role: 'tablist' }, [
-        el('button', {
-          type: 'button',
-          className: `subtab-btn${activeTab === 'pending' ? ' is-active' : ''}`,
-          textContent: `결재 대기 (${pending.length})`,
-          onClick: () => {
-            state.approvalsTab = 'pending';
-            renderCurrentRoute();
-          },
+      const itemsByFilter = {
+        pending,
+        all: allItems,
+        approved: approvedList,
+        rejected: rejectedList,
+      };
+      const filteredItems = itemsByFilter[filterKey] || pending;
+
+      const filterDefs = [
+        { key: 'pending', label: '결재 대기', count: pending.length },
+        { key: 'all', label: '전체', count: allItems.length },
+        { key: 'approved', label: '승인', count: approvedList.length },
+        { key: 'rejected', label: '반려', count: rejectedList.length },
+      ];
+
+      const filterTabsEl = el('div', { className: 'filter-tabs', role: 'tablist', 'aria-label': '결재 상태 필터' },
+        filterDefs.map((def) =>
+          el('button', {
+            type: 'button',
+            role: 'tab',
+            'aria-selected': String(filterKey === def.key),
+            className: `filter-tab${filterKey === def.key ? ' is-active' : ''}`,
+            onClick: () => {
+              state.approvalsTab = def.key;
+              renderCurrentRoute();
+            },
+          }, [
+            el('span', { textContent: def.label }),
+            el('span', { className: 'filter-tab-count', textContent: String(def.count) }),
+          ])
+        )
+      );
+
+      const statsGrid = el('div', { className: 'stats-grid-3' }, [
+        buildStatCard({
+          label: '결재 대기',
+          count: pending.length,
+          tone: 'amber',
+          icon: 'clock',
+          hint: '검토 및 결재가 필요한 항목',
         }),
-        el('button', {
-          type: 'button',
-          className: `subtab-btn${activeTab === 'history' ? ' is-active' : ''}`,
-          textContent: `처리 완료 (${history.length})`,
-          onClick: () => {
-            state.approvalsTab = 'history';
-            renderCurrentRoute();
-          },
+        buildStatCard({
+          label: '승인',
+          count: approvedList.length,
+          tone: 'green',
+          icon: 'check',
+          hint: '승인 완료된 연차 · 주간보고',
+        }),
+        buildStatCard({
+          label: '반려',
+          count: rejectedList.length,
+          tone: 'red',
+          icon: 'x',
+          hint: '보완 요청 및 반려 내역',
         }),
       ]);
 
-      const listEl = items.length === 0
-        ? el('div', {
-          className: 'card state-box',
-          textContent: activeTab === 'pending' ? '대기 중인 결재 요청이 없습니다.' : '처리 완료된 결재 내역이 없습니다.',
-        })
-        : el('div', { className: 'stack-md' }, items.map((item) =>
-          buildApprovalItemCard(item, {
-            canDecide: activeTab === 'pending',
+      const emptyMessages = {
+        pending: '대기 중인 결재 요청이 없습니다.',
+        all: '접수된 결재 내역이 없습니다.',
+        approved: '승인 완료된 내역이 없습니다.',
+        rejected: '반려 처리된 내역이 없습니다.',
+      };
+
+      const tableCard = el('section', { className: 'card stack-md' }, [
+        el('div', { className: 'card-header' }, [
+          filterTabsEl,
+          makeBadge(`${filteredItems.length}건`, 'badge badge-neutral'),
+        ]),
+        filteredItems.length === 0
+          ? el('div', { className: 'state-box', textContent: emptyMessages[filterKey] })
+          : buildApprovalsTable(filteredItems, {
+            showInlineActions: true,
             onAfterAction: () => renderCurrentRoute(),
-            pageErrBox,
-          })
-        ));
+            errBox: pageErrBox,
+          }),
+      ]);
 
       dom.routeView.replaceChildren(
         el('div', { className: 'stack-lg' }, [
           el('div', { className: 'page-header' }, [
             el('div', {}, [
-              el('h2', { className: 'page-title', textContent: '승인 관리' }),
-              el('p', { className: 'page-subtitle', textContent: `${user.team} 연차 · 주간보고 결재` }),
+              el('h2', { className: 'page-title', textContent: '결재 관리' }),
+              el('p', { className: 'page-subtitle', textContent: `${user.team} 연차 · 주간보고 결재 요청을 한눈에 관리합니다.` }),
             ]),
-            tabsEl,
           ]),
+          statsGrid,
           pageErrBox,
-          listEl,
+          tableCard,
         ])
       );
       return;
@@ -2593,27 +3219,90 @@
     updateNavApprovalsBadge(0);
 
     const mine = Array.isArray(mineList) ? mineList : [];
-    const listEl = mine.length === 0
-      ? el('div', { className: 'card state-box', textContent: '내가 올린 결재 내역이 없습니다.' })
-      : el('div', { className: 'stack-md' }, mine.map((item) =>
-        buildApprovalItemCard(item, {
-          canDecide: false,
+    const empPending = mine.filter((x) => x.status === 'pending' || x.status === 'submitted');
+    const empApproved = mine.filter((x) => x.status === 'approved');
+    const empRejected = mine.filter((x) => x.status === 'rejected');
+    const empFilter = ['all', 'pending', 'approved', 'rejected'].includes(state.employeeApprovalsTab)
+      ? state.employeeApprovalsTab
+      : 'all';
+    const empMap = {
+      all: mine,
+      pending: empPending,
+      approved: empApproved,
+      rejected: empRejected,
+    };
+    const empFiltered = empMap[empFilter] || mine;
+
+    const empTabsEl = el('div', { className: 'filter-tabs', role: 'tablist', 'aria-label': '내 결재 상태 필터' }, [
+      { key: 'all', label: '전체', count: mine.length },
+      { key: 'pending', label: '대기', count: empPending.length },
+      { key: 'approved', label: '승인', count: empApproved.length },
+      { key: 'rejected', label: '반려', count: empRejected.length },
+    ].map((def) =>
+      el('button', {
+        type: 'button',
+        role: 'tab',
+        'aria-selected': String(empFilter === def.key),
+        className: `filter-tab${empFilter === def.key ? ' is-active' : ''}`,
+        onClick: () => {
+          state.employeeApprovalsTab = def.key;
+          renderCurrentRoute();
+        },
+      }, [
+        el('span', { textContent: def.label }),
+        el('span', { className: 'filter-tab-count', textContent: String(def.count) }),
+      ])
+    ));
+
+    const statsGrid = el('div', { className: 'stats-grid-3' }, [
+      buildStatCard({
+        label: '결재 대기',
+        count: empPending.length,
+        tone: 'amber',
+        icon: 'clock',
+        hint: '팀장 검토 중인 요청',
+      }),
+      buildStatCard({
+        label: '승인',
+        count: empApproved.length,
+        tone: 'green',
+        icon: 'check',
+        hint: '승인 완료된 내역',
+      }),
+      buildStatCard({
+        label: '반려',
+        count: empRejected.length,
+        tone: 'red',
+        icon: 'x',
+        hint: '보완 후 재제출 필요',
+      }),
+    ]);
+
+    const tableCard = el('section', { className: 'card stack-md' }, [
+      el('div', { className: 'card-header' }, [
+        empTabsEl,
+        makeBadge(`총 ${empFiltered.length}건`, 'badge badge-neutral'),
+      ]),
+      empFiltered.length === 0
+        ? el('div', { className: 'state-box', textContent: '해당 상태의 결재 내역이 없습니다.' })
+        : buildApprovalsTable(empFiltered, {
+          showInlineActions: false,
           onAfterAction: () => renderCurrentRoute(),
-          pageErrBox,
-        })
-      ));
+          errBox: pageErrBox,
+        }),
+    ]);
 
     dom.routeView.replaceChildren(
       el('div', { className: 'stack-lg' }, [
         el('div', { className: 'page-header' }, [
           el('div', {}, [
-            el('h2', { className: 'page-title', textContent: '내가 올린 결재' }),
-            el('p', { className: 'page-subtitle', textContent: `${user.name} · 연차 및 주간보고 승인 결과 확인` }),
+            el('h2', { className: 'page-title', textContent: '결재 관리' }),
+            el('p', { className: 'page-subtitle', textContent: `${user.name} · 내가 올린 연차 및 주간보고 승인 결과 확인` }),
           ]),
-          makeBadge(`총 ${mine.length}건`, 'badge badge-neutral'),
         ]),
+        statsGrid,
         pageErrBox,
-        listEl,
+        tableCard,
       ])
     );
   }
@@ -3185,7 +3874,7 @@
     const optgroups = Array.from(groups.entries()).map(([team, members]) =>
       el('optgroup', { label: team }, members.map((u) => {
         const roleLabel = ROLE_META[u.role]?.label || u.role;
-        return el('option', { value: String(u.id), textContent: `${u.name} (${roleLabel})` });
+        return el('option', { value: String(u.id), textContent: `${u.name} · ${roleLabel}` });
       }))
     );
 

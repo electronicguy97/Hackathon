@@ -1,3 +1,5 @@
+import { crc32, deflateRawSync } from 'node:zlib';
+
 const baseUrl = new URL(process.argv[2] ?? 'http://localhost:3000');
 const employeeId = 1;
 const managerId = 3;
@@ -231,7 +233,7 @@ await step('Validate seeded week labels and prefill only last week’s next entr
     expect(history.length, userId <= 2 ? 1 : 2, 'seeded weekly report count');
     expectFields(previous, {
       userId, weekStart: previousWeek, status: 'approved', approverId: userId <= 2 ? managerId : dataManagerId,
-      weekLabel: expectedWeekLabel(previousWeek), nextWeekLabel: expectedWeekLabel(weekStart)
+      weekLabel: expectedWeekLabel(previousWeek), nextWeekLabel: expectedWeekLabel(weekStart), fileName: null
     });
     if (userId > 2) {
       expectFields(history[0], {
@@ -736,4 +738,331 @@ await step('Chat opens rooms and reports room availability and today’s meeting
 
 await step('Chat returns 400 for messages over 500 characters', async () => {
   await request(chatPath, 400, { userId: employeeId, text: '가'.repeat(501) });
+});
+
+function fixtureZip(parts, storedPart) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const [filename, xml] of Object.entries(parts)) {
+    const name = Buffer.from(filename);
+    const original = Buffer.from(xml);
+    const method = filename === storedPart ? 0 : 8;
+    const compressed = method === 0 ? original : deflateRawSync(original);
+    const crc = crc32(original);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt16LE(33, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(original.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    localParts.push(local, name, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(method, 10);
+    central.writeUInt16LE(33, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(original.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + compressed.length;
+  }
+  const directory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(centralParts.length / 2, 8);
+  end.writeUInt16LE(centralParts.length / 2, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, directory, end]);
+}
+
+function fictionalWorkbook({ label = expectedWeekLabel(weekStart), detail = '화면 설계 & 검토',
+  selectedWeek = weekStart, stored = false, empty = false } = {}) {
+  const spreadsheet = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+  const types = 'http://schemas.openxmlformats.org/package/2006/content-types';
+  const relations = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const office = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const escape = (text) => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  const text = (value) => `<t xml:space="preserve">${escape(value)}</t>`;
+  const strings = [];
+  function shared(address, ...runs) {
+    const content = runs.length === 1 ? text(runs[0]) : runs.map((run) => `<r>${text(run)}</r>`).join('');
+    strings.push(`<si>${content}</si>`);
+    return `<c r="${address}" t="s"><v>${strings.length - 1}</v></c>`;
+  }
+  const inline = (address, value) => `<c r="${address}" t="inlineStr"><is>${text(value)}</is></c>`;
+  const numeric = (address, value) => `<c r="${address}"><v>${value}</v></c>`;
+  const row = (number, ...cells) => `<row r="${number}">${cells.join('')}</row>`;
+  const rows = [
+    row(1, shared('B1', label), inline('F1', expectedWeekLabel(offsetDay(selectedWeek, 7)))),
+    row(2, shared('A2', '개인일정(휴가 등)'), inline('B2', '금요일 오후 반차'), inline('F2', '수요일 재택')),
+    row(3, inline('A3', '이슈사항'), shared('B3', '테스트 일정 확인'), inline('F3', '검증 환경 준비')),
+    row(4, inline('A4', '요청사항/전달사항'), inline('B4', '결과 공유'), shared('F4', '시연 일정 확인')),
+    row(5, shared('A5', '요일'), inline('B5', '구분'), inline('C5', '형태'), inline('D5', '내용'),
+      inline('E5', '시간'), inline('F5', '구분'), inline('G5', '형태'), inline('H5', '내용'), inline('I5', '시간'))
+  ];
+  function entry(rowNumber, start, category, workType, detailCell, hours) {
+    const letters = start === 'B' ? 'BCDE' : 'FGHI';
+    return [
+      shared(letters[0] + rowNumber, category),
+      inline(letters[1] + rowNumber, workType),
+      detailCell,
+      hours === null ? `<c r="${letters[3]}${rowNumber}"/>` : numeric(letters[3] + rowNumber, hours)
+    ];
+  }
+  const current = (...args) => empty ? [] : entry(...args);
+  rows.push(
+    row(6, shared('A6', '월'),
+      ...current(6, 'B', '사내 그룹웨어', '회사', empty ? '' : shared('D6', `${detail}\n`, '시연 시나리오 정리'), 7),
+      ...entry(6, 'F', '사내 그룹웨어', '회사', inline('H6', '접근성 점검'), 5)),
+    row(7, ...current(7, 'B', '운영 지원', '재택', inline('D7', '가상 서버 점검'), null)),
+    row(10, inline('A10', '화'),
+      ...current(10, 'B', '데이터 대시보드', '사무실', inline('D10', '가상 지표 검증'), 8),
+      ...entry(10, 'F', 'AI 챗봇 PoC', '출장', inline('H10', '질문 흐름 확인'), 6)),
+    row(14, shared('A14', '수'), ...entry(14, 'F', '운영 지원', '재택', inline('H14', '점검 문서 정리'), 2)),
+    row(18, inline('A18', '목'), ...current(18, 'B', '사내 그룹웨어', '회사', inline('D18', '통합 테스트'), 14)),
+    row(19, ...current(19, 'B', '운영 지원', '외근', inline('D19', '가상 점검 시연'), 11)),
+    row(22, shared('A22', '금'), ...current(22, 'B', 'AI 챗봇 PoC', '회사', inline('D22', '정리'), 2)),
+    row(26, inline('B26', '합계'), '<c r="E26" t="e"><f>SUM(E6:E25)</f><v>#REF!</v></c>')
+  );
+  const merges = ['B1:E1', 'F1:I1', 'B2:E2', 'F2:I2', 'B3:E3', 'F3:I3', 'B4:E4', 'F4:I4',
+    'A6:A9', 'A10:A13', 'A14:A17', 'A18:A21', 'A22:A25'];
+  const sheet = `<worksheet xmlns="${spreadsheet}"><sheetData>${rows.join('')}</sheetData>` +
+    `<mergeCells count="${merges.length}">${merges.map((ref) => `<mergeCell ref="${ref}"/>`).join('')}</mergeCells></worksheet>`;
+  const parts = {
+    '[Content_Types].xml': `<Types xmlns="${types}">` +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>' +
+      '</Types>',
+    '_rels/.rels': `<Relationships xmlns="${relations}"><Relationship Id="rId1" Type="${office}/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    'xl/workbook.xml': `<workbook xmlns="${spreadsheet}" xmlns:r="${office}"><sheets><sheet name="주간보고" sheetId="1" r:id="rId42"/></sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': `<Relationships xmlns="${relations}">` +
+      `<Relationship Id="rId9" Type="${office}/sharedStrings" Target="sharedStrings.xml"/>` +
+      `<Relationship Id="rId42" Type="${office}/worksheet" Target="/xl/worksheets/sheet1.xml"/></Relationships>`,
+    'xl/sharedStrings.xml': `<sst xmlns="${spreadsheet}">${strings.join('')}</sst>`,
+    'xl/worksheets/sheet1.xml': sheet
+  };
+  for (const filename of Object.keys(parts)) parts[filename] = declaration + parts[filename];
+  return fixtureZip(parts, stored ? 'xl/sharedStrings.xml' : null);
+}
+
+const uploadUserId = 8;
+const uploadName = '주간보고 시연.xlsx';
+const revisedName = '주간보고 수정본.xlsx';
+let uploadedId;
+let revisedBytes;
+
+async function uploadWorkbook(bytes, expectedStatus = 200, { userId = uploadUserId, fileName = uploadName } = {}) {
+  const query = new URLSearchParams({ userId, fileName });
+  const response = await fetch(new URL(`${reportsPath}/upload?${query}`, baseUrl), {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+    body: bytes, signal: AbortSignal.timeout(5000)
+  });
+  const result = await response.json();
+  expect(response.status, expectedStatus, `upload response: ${JSON.stringify(result)}`);
+  return result;
+}
+
+await step('XLSX upload parses week labels, both halves, merged weekdays and worksheet warnings', async () => {
+  const { report, warnings } = await uploadWorkbook(fictionalWorkbook());
+  uploadedId = report.id;
+  expectFields(report, {
+    userId: uploadUserId, team: '개발팀', weekStart, weekLabel: expectedWeekLabel(weekStart),
+    nextWeekLabel: expectedWeekLabel(offsetDay(weekStart, 7)), status: 'draft', fileName: uploadName,
+    totalHours: 42, nextTotalHours: 13, submittedAt: null
+  });
+  expectFields(report.current, { personalSchedule: '금요일 오후 반차', issues: '테스트 일정 확인', requests: '결과 공유' });
+  expectFields(report.next, { personalSchedule: '수요일 재택', issues: '검증 환경 준비', requests: '시연 일정 확인' });
+  expect(report.current.entries.map((entry) => entry.day).join(), 'mon,mon,tue,thu,thu,fri', 'current weekdays');
+  expect(report.next.entries.map((entry) => entry.day).join(), 'mon,tue,wed', 'planned weekdays');
+  expectFields(report.current.entries[0], {
+    category: '사내 그룹웨어', workType: '회사', content: '화면 설계 & 검토\n시연 시나리오 정리', hours: 7
+  });
+  expectFields(report.current.entries[1], { category: '운영 지원', workType: '재택', hours: 0 });
+  expectFields(report.current.entries[2], { category: '데이터 대시보드', workType: '회사', hours: 8 });
+  expectFields(report.next.entries[1], { category: 'AI 챗봇 PoC', workType: '출장', hours: 6 });
+  expect(warnings.length, 3, 'warnings without a total-row error');
+  expect(warnings.some((value) => /7행.*0시간/.test(value)), true, 'empty-hours warning');
+  expect(warnings.some((value) => /10행.*회사/.test(value)), true, 'invalid work-type warning');
+  expect(warnings.some((value) => /목요일.*24시간/.test(value)), true, 'daily total warning');
+  const current = await request(`${reportsPath}/current?userId=${uploadUserId}`);
+  expectFields(current, { id: uploadedId, status: 'draft', fileName: uploadName });
+});
+
+await step('Re-upload overwrites the same draft and reads stored ZIP entries', async () => {
+  revisedBytes = fictionalWorkbook({ detail: '가상 장애 화면 검토', stored: true });
+  const { report } = await uploadWorkbook(revisedBytes, 200, { fileName: revisedName });
+  expectFields(report, { id: uploadedId, status: 'draft', fileName: revisedName });
+  expect(report.current.entries[0].content, '가상 장애 화면 검토\n시연 시나리오 정리', 'replacement contents');
+});
+
+await step('Only the owner submits the upload, and the manager receives its parsed approval detail', async () => {
+  const path = `${reportsPath}/${uploadedId}/submit`;
+  await request(path, 403, { userId: employeeId });
+  const report = await request(path, 200, { userId: uploadUserId });
+  expectFields(report, { id: uploadedId, status: 'submitted', fileName: revisedName, totalHours: 42 });
+  expect(report.current.entries[1].hours, 0, 'submit accepts a warned upload row');
+  const queue = await request(queuePath);
+  const item = queue.find(({ kind, id }) => kind === 'weekly' && id === uploadedId);
+  expectFields(item.detail, { userId: uploadUserId, status: 'submitted', fileName: revisedName });
+  expectFields(item.detail.current.entries[2], { day: 'tue', category: '데이터 대시보드', workType: '회사' });
+  await request(path, 409, { userId: uploadUserId });
+  await uploadWorkbook(revisedBytes, 409);
+  await uploadWorkbook(revisedBytes, 409, { userId: employeeId });
+});
+
+await step('Workbook download returns original bytes to authorized roles and 403 to other users', async () => {
+  for (const viewerId of [uploadUserId, managerId, executiveId]) {
+    const url = new URL(`${reportsPath}/${uploadedId}/file?viewerId=${viewerId}`, baseUrl);
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    expect(response.status, 200, `download for user ${viewerId}`);
+    expect(response.headers.get('content-type'),
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'XLSX media type');
+    expect(response.headers.get('content-disposition').includes(`filename*=UTF-8''${encodeURIComponent(revisedName)}`),
+      true, 'original filename in attachment header');
+    expect(Buffer.from(await response.arrayBuffer()).equals(revisedBytes), true, 'download matches re-upload bytes');
+  }
+  for (const viewerId of [employeeId, 4, dataManagerId]) {
+    await request(`${reportsPath}/${uploadedId}/file?viewerId=${viewerId}`, 403);
+  }
+  const reports = await request(`${reportsPath}?userId=${employeeId}`);
+  const seed = reports.find((report) => report.weekStart === offsetDay(weekStart, -7));
+  expect(seed.fileName, null, 'seed has no original');
+  await request(`${reportsPath}/${seed.id}/file?viewerId=${employeeId}`, 404);
+});
+
+await step('Workbook upload rejects forbidden roles, invalid formats, missing label dates and oversize files', async () => {
+  await uploadWorkbook(revisedBytes, 403, { userId: managerId });
+  await uploadWorkbook(revisedBytes, 403, { userId: executiveId });
+  const garbage = await uploadWorkbook(Buffer.from('this is not a workbook'), 400);
+  expect(garbage.error.startsWith('주간보고 양식을 읽을 수 없습니다: '), true, 'ZIP format error');
+  const missingDate = await uploadWorkbook(fictionalWorkbook({ label: '날짜 없는 주차 라벨' }), 400);
+  expect(missingDate.error.startsWith('주간보고 양식을 읽을 수 없습니다: B1'), true, 'invalid label error');
+  await uploadWorkbook(Buffer.alloc(2 * 1024 * 1024 + 1), 413);
+});
+
+await step('Rejected upload can be replaced and resubmitted, while empty current work cannot be submitted', async () => {
+  const rejected = await request(`${reportsPath}/${uploadedId}/reject`, 200, rejection);
+  expectFields(rejected, { status: 'rejected', fileName: revisedName });
+  const { report } = await uploadWorkbook(fictionalWorkbook({ detail: '반려 의견 반영' }));
+  expectFields(report, { id: uploadedId, status: 'draft', comment: null, approverId: null, fileName: uploadName });
+  const resubmitted = await request(`${reportsPath}/${uploadedId}/submit`, 200, { userId: uploadUserId });
+  expectFields(resubmitted, { id: uploadedId, status: 'submitted', fileName: uploadName });
+
+  const futureWeek = offsetDay(weekStart, 7);
+  const emptyWorkbook = fictionalWorkbook({ label: expectedWeekLabel(futureWeek), selectedWeek: futureWeek, empty: true });
+  const { report: empty } = await uploadWorkbook(emptyWorkbook);
+  expect(empty.current.entries.length, 0, 'empty current report allowed for upload');
+  await request(`${reportsPath}/${empty.id}/submit`, 400, { userId: uploadUserId });
+});
+
+const docsPath = '/api/docs';
+const searchDocsPath = (q, limit) =>
+  `${docsPath}/search?${new URLSearchParams(limit === undefined ? { q } : { q, limit })}`;
+const docDraft = {
+  userId: employeeId, space: '가상 검증 공간', title: '가상 검증 기록',
+  body: '앞부분의 검증 기록입니다.\n\n## 진행 내역\n가상 사례를 확인했습니다.',
+  labels: '검증,기록'
+};
+let releaseDoc;
+let guideDoc;
+
+await step('Wiki lists and reads the two fictional seed documents', async () => {
+  const docs = await request(docsPath);
+  expect(docs.length, 2, 'seeded wiki documents');
+  expectFields(docs[0], { space: '그룹웨어 프로젝트', docKey: 'GW', title: '그룹웨어 v1 출시 일정' });
+  expectFields(docs[1], { space: '사내 가이드', title: '연차·회의실 이용 가이드' });
+  expect('body' in docs[0], false, 'list contains only metadata');
+  releaseDoc = await request(`${docsPath}/${docs[0].id}`);
+  guideDoc = await request(`${docsPath}/${docs[1].id}`);
+  for (const doc of [releaseDoc, guideDoc]) {
+    expect(doc.body.split('\n')[0], '> 예시 문서입니다. 실제 일정·규정이 아닙니다.', 'fictional document notice');
+    expect(typeof doc.authorName, 'string', 'document author');
+  }
+  for (const key of ['GW-101', 'GW-102', 'GW-103', 'GW-104', 'GW-105', 'GW-106']) {
+    expect(releaseDoc.body.includes(key), true, `seed issue ${key}`);
+  }
+  await request(`${docsPath}/99999`, 404);
+});
+
+await step('Wiki creates and updates Markdown with the correct author and last editor', async () => {
+  const created = await request(docsPath, 201, docDraft);
+  expectFields(created, {
+    space: docDraft.space, title: docDraft.title, body: docDraft.body, labels: docDraft.labels,
+    authorName: '김신입', updatedByName: '김신입'
+  });
+  expect(/^DOC-\d+$/.test(created.docKey), true, 'new document key');
+  const nextBody = `${docDraft.body}\n\n### 격리검증표식\n  단계와 결과를 기록합니다.\n`;
+  const edited = await request(`${docsPath}/${created.id}`, 200, {
+    userId: 2, title: '가상 검증 기록 수정본', body: nextBody, labels: '검증,수정'
+  }, 'PUT');
+  expectFields(edited, {
+    id: created.id, docKey: created.docKey, space: docDraft.space, authorName: '김신입',
+    updatedByName: '이분석', body: nextBody, labels: '검증,수정', createdAt: created.createdAt
+  });
+  expectFields(await request(`${docsPath}/${created.id}`), { updatedByName: '이분석', body: nextBody });
+  const subsection = await request(searchDocsPath('격리검증표식', 1));
+  expectFields(subsection[0], { docId: created.id, heading: '격리검증표식', excerpt: '단계와 결과를 기록합니다.' });
+});
+
+await step('Wiki rejects missing fields, oversized bodies and invalid search parameters', async () => {
+  for (const fields of [{ title: ' ' }, { body: '' }, { space: '' }, { body: '가'.repeat(20001) }, { labels: [] }]) {
+    await request(docsPath, 400, { ...docDraft, ...fields });
+  }
+  await request(`${docsPath}/${releaseDoc.id}`, 400, { ...docDraft, body: '가'.repeat(20001) }, 'PUT');
+  await request(searchDocsPath('정식 오픈', 0), 400);
+  await request(`${docsPath}/search`, 400);
+});
+
+await step('Wiki search ranks the milestone first, excludes zero-score sections and honors the limit', async () => {
+  const results = await request(searchDocsPath('정식 오픈'));
+  expectFields(results[0], { docId: releaseDoc.id, heading: '마일스톤', title: releaseDoc.title });
+  expect(results[0].excerpt.includes('2027-01-04'), true, 'release date in the excerpt');
+  expect(results.every((result, index) => result.score > 0 && result.excerpt.length <= 300 &&
+    (index === 0 || results[index - 1].score >= result.score)), true, 'scoring and excerpt bounds');
+  expect(Object.keys(results[0]).sort().join(), 'docId,excerpt,heading,score,space,title', 'search result shape');
+  expect((await request(searchDocsPath('정식 오픈은', 1))).length, 1, 'search limit');
+  expect((await request(searchDocsPath('꽁쀼잉꽈쿵'))).length, 0, 'no matches for nonsense');
+});
+
+await step('Chat quotes the correct wiki sections and facts for release, issue, half-day and API schedule', async () => {
+  const questions = [
+    ['그룹웨어 정식 오픈 언제야?', releaseDoc, '마일스톤', '2027-01-04'],
+    ['GW-104 담당자 누구야?', releaseDoc, '작업 목록', 'GW-104 | 주간보고 업로드 구현 | 박사원'],
+    ['반차 시간 몇 시부터야?', guideDoc, '연차 신청 기준', '09:00~14:00'],
+    ['API 개발 일정 알려줘', releaseDoc, '마일스톤', '12/07~12/18']
+  ];
+  for (const [question, doc, heading, fact] of questions) {
+    const answer = await chat(question);
+    expect(answer.reply.includes(fact), true, `fact for ${question}`);
+    expect(answer.reply.startsWith('문서에서 찾은 내용이에요.'), true, 'grounded quote introduction');
+    expectFields(answer.citations[0], { docId: doc.id, title: doc.title, heading });
+    expectFields(answer.action, { kind: 'navigate', route: 'docs', docId: doc.id, label: doc.title });
+  }
+});
+
+await step('Chat uses high-scoring wiki matches on general questions and preserves the daily status', async () => {
+  const inferred = await chat('시범 운영은 며칠이야?');
+  expect(inferred.citations.some(({ docId }) => docId === releaseDoc.id), true, 'high-score implicit grounding');
+  const missing = await chat('GW-999999?');
+  expect(missing.reply.includes('문서에서 찾지 못했어요'), true, 'no grounded evidence');
+  expect(missing.citations.length, 0, 'no citations for a missing issue');
+  expectFields(missing.action, { kind: 'navigate', route: 'docs' });
+  const status = await chat('오늘 요약');
+  expect(status.reply.includes('요약이에요') && status.reply.includes('오늘 내 회의'), true, 'daily status reply');
+  expectFields(status, { action: null });
+  expect(status.citations.length, 0, 'no citations for live home status');
 });
