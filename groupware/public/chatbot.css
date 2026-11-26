@@ -306,3 +306,26 @@
 @media (prefers-reduced-motion: reduce) {
   .cb-dot { animation: none; opacity: 0.6; }
 }
+
+/* 헤더: 새 대화 버튼 */
+.cb-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cb-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cb-new:hover { background: rgba(255, 255, 255, 0.24); }
+.cb-new:focus-visible, .cb-close:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }

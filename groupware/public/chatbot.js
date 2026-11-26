@@ -104,12 +104,16 @@
   const sendBtn = h('button', { type: 'submit', className: 'cb-send', text: '보내기' });
   const form = h('form', { className: 'cb-form' }, input, sendBtn);
   const closeBtn = h('button', { type: 'button', className: 'cb-close', 'aria-label': '닫기', text: '×' });
+  const newChatBtn = h('button', {
+    type: 'button', className: 'cb-new', 'aria-label': '새 대화 시작', title: '새 대화 시작'
+  });
+  newChatBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg><span>새 대화</span>';
   const panel = h('section', { className: 'cb-panel', 'aria-label': '업무 도우미', hidden: '' },
     h('header', { className: 'cb-header' },
       h('div', {},
         h('strong', { text: '업무 도우미' }),
         h('span', { className: 'cb-sub', text: '연차 · 주간보고 · 출퇴근 · 결재 · 회의실' })),
-      closeBtn),
+      h('div', { className: 'cb-header-actions' }, newChatBtn, closeBtn)),
     log,
     form);
 
@@ -178,9 +182,25 @@
     say('bot', `${name || ''} 님, 무엇을 도와드릴까요?\n${capabilitiesText}`, chips(suggestionList));
   }
 
-  userSelect()?.addEventListener('change', () => {
+  // 대화 세션: 새 대화를 시작하면 번호가 바뀌고, 이전 세션에서 늦게 도착한 답장은 버린다
+  let session = 0;
+  function resetConversation() {
+    session += 1;
+    busy = false;
+    sendBtn.disabled = false;
+    input.value = '';
     log.replaceChildren();
+  }
+
+  userSelect()?.addEventListener('change', () => {
+    resetConversation();
     if (!panel.hidden) greet();
+  });
+
+  newChatBtn.addEventListener('click', () => {
+    resetConversation();
+    greet();
+    input.focus();
   });
 
   // ---------- 보내기 ----------
@@ -196,6 +216,7 @@
     }
     busy = true;
     sendBtn.disabled = true;
+    const mySession = session;
     say('me', text);
     input.value = '';
     const typing = say('bot', '');
@@ -212,6 +233,7 @@
     try {
       const res = await api('/api/chat', { method: 'POST', body: { userId, text } })
         .finally(pad);
+      if (mySession !== session) return;   // 그사이 새 대화를 시작했으면 무시
       typing.remove();
       // 관련 화면으로 먼저 전환 (출퇴근, 주간보고, 연차, 승인, 문서, 홈)
       if (res.screen) {
@@ -255,12 +277,15 @@
       }
       if (res.action) await handleAction(res.action, msg);
     } catch (err) {
+      if (mySession !== session) return;
       typing.remove();
       say('bot', err.message).classList.add('is-error');
     } finally {
-      busy = false;
-      sendBtn.disabled = false;
-      input.focus();
+      if (mySession === session) {
+        busy = false;
+        sendBtn.disabled = false;
+        input.focus();
+      }
     }
   }
 
