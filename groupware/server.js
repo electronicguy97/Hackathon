@@ -24,7 +24,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('employee', 'manager')),
+    role TEXT NOT NULL CHECK (role IN ('employee', 'manager', 'executive')),
     team TEXT NOT NULL,
     annual_total REAL NOT NULL
   );
@@ -54,9 +54,8 @@ db.exec(`
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
     week_start TEXT NOT NULL,
-    items TEXT NOT NULL,
-    next_plan TEXT NOT NULL,
-    issues TEXT NOT NULL,
+    current_json TEXT NOT NULL,
+    next_json TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('draft', 'submitted', 'approved', 'rejected')),
     approver_id INTEGER REFERENCES users(id),
     comment TEXT,
@@ -64,6 +63,34 @@ db.exec(`
     decided_at TEXT,
     updated_at TEXT NOT NULL,
     UNIQUE (user_id, week_start)
+  );
+  CREATE TABLE IF NOT EXISTS team_summaries (
+    id INTEGER PRIMARY KEY,
+    team TEXT NOT NULL,
+    week_start TEXT NOT NULL,
+    manager_id INTEGER NOT NULL REFERENCES users(id),
+    summary TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (team, week_start)
+  );
+  CREATE TABLE IF NOT EXISTS rooms (
+    id INTEGER PRIMARY KEY,
+    office TEXT NOT NULL,
+    name TEXT NOT NULL,
+    capacity INTEGER NOT NULL,
+    equipment TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS room_reservations (
+    id INTEGER PRIMARY KEY,
+    room_id INTEGER NOT NULL REFERENCES rooms(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    date TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    title TEXT NOT NULL,
+    attendees TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('reserved', 'cancelled')),
+    created_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS notices (
     id INTEGER PRIMARY KEY,
@@ -159,8 +186,8 @@ const setCheckOut = db.prepare(`
 `);
 
 const reportRows = `
-  SELECT r.id, r.user_id AS userId, u.name AS userName, r.week_start AS weekStart,
-         r.items, r.next_plan AS nextPlan, r.issues, r.status, r.approver_id AS approverId,
+  SELECT r.id, r.user_id AS userId, u.name AS userName, u.team, r.week_start AS weekStart,
+         r.current_json AS currentJson, r.next_json AS nextJson, r.status, r.approver_id AS approverId,
          a.name AS approverName, r.comment, r.submitted_at AS submittedAt,
          r.decided_at AS decidedAt, r.updated_at AS updatedAt
   FROM weekly_reports r JOIN users u ON u.id = r.user_id
@@ -169,11 +196,14 @@ const reportRows = `
 const findReport = db.prepare(`${reportRows} WHERE r.id = ?`);
 const findWeek = db.prepare(`${reportRows} WHERE r.user_id = ? AND r.week_start = ?`);
 const listReports = db.prepare(`${reportRows} WHERE r.user_id = ? ORDER BY r.week_start DESC`);
+const listTeamReports = db.prepare(`
+  ${reportRows} WHERE u.team = ? AND u.role = 'employee' AND r.week_start = ?
+`);
 const saveReport = db.prepare(`
-  INSERT INTO weekly_reports (user_id, week_start, items, next_plan, issues, status, submitted_at, updated_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO weekly_reports (user_id, week_start, current_json, next_json, status, submitted_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT (user_id, week_start) DO UPDATE SET
-    items = excluded.items, next_plan = excluded.next_plan, issues = excluded.issues,
+    current_json = excluded.current_json, next_json = excluded.next_json,
     status = excluded.status, approver_id = NULL, comment = NULL, decided_at = NULL,
     submitted_at = excluded.submitted_at, updated_at = excluded.updated_at
   WHERE weekly_reports.status IN ('draft', 'rejected')
@@ -182,6 +212,63 @@ const saveReport = db.prepare(`
 const updateReport = db.prepare(`
   UPDATE weekly_reports SET status = ?, approver_id = ?, comment = ?, decided_at = ?, updated_at = ?
   WHERE id = ? AND status = 'submitted'
+`);
+
+const listReportingTeams = db.prepare(`
+  SELECT team, MIN(CASE WHEN role = 'manager' THEN name END) AS managerName
+  FROM users WHERE role <> 'executive' GROUP BY team ORDER BY team
+`);
+const listTeamEmployees = db.prepare(`
+  SELECT id AS userId, name AS userName FROM users WHERE team = ? AND role = 'employee' ORDER BY id
+`);
+const findTeamSummary = db.prepare(`
+  SELECT s.summary, u.name AS managerName, s.updated_at AS updatedAt
+  FROM team_summaries s JOIN users u ON u.id = s.manager_id
+  WHERE s.team = ? AND s.week_start = ?
+`);
+const saveTeamSummary = db.prepare(`
+  INSERT INTO team_summaries (team, week_start, manager_id, summary, updated_at) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT (team, week_start) DO UPDATE SET
+    manager_id = excluded.manager_id, summary = excluded.summary, updated_at = excluded.updated_at
+`);
+
+const listRooms = db.prepare('SELECT id, office, name, capacity, equipment FROM rooms ORDER BY id');
+const findRoom = db.prepare('SELECT id FROM rooms WHERE id = ?');
+const reservationRows = `
+  SELECT r.id, r.room_id AS roomId, room.name AS roomName, r.user_id AS userId,
+         u.name AS userName, u.team, r.date, r.start_time AS startTime, r.end_time AS endTime,
+         r.title, r.attendees, r.status, r.created_at AS createdAt
+  FROM room_reservations r
+  JOIN rooms room ON room.id = r.room_id
+  JOIN users u ON u.id = r.user_id
+`;
+const findReservation = db.prepare(`${reservationRows} WHERE r.id = ?`);
+const listDayReservations = db.prepare(`
+  ${reservationRows} WHERE r.date = ? AND r.status = 'reserved'
+  ORDER BY r.room_id, r.start_time, r.id
+`);
+const listMyReservations = db.prepare(`
+  ${reservationRows} WHERE r.user_id = ? AND r.date >= ? AND r.status = 'reserved'
+  ORDER BY r.date, r.start_time, r.id
+`);
+const homeReservations = db.prepare(`
+  SELECT r.id, room.name AS roomName, r.start_time AS startTime, r.end_time AS endTime, r.title
+  FROM room_reservations r JOIN rooms room ON room.id = r.room_id
+  WHERE r.user_id = ? AND r.date = ? AND r.status = 'reserved'
+  ORDER BY r.start_time, r.id
+`);
+const overlappingReservation = db.prepare(`
+  SELECT r.start_time AS startTime, r.end_time AS endTime, u.name AS userName
+  FROM room_reservations r JOIN users u ON u.id = r.user_id
+  WHERE r.room_id = ? AND r.date = ? AND r.status = 'reserved' AND r.start_time < ? AND r.end_time > ?
+  ORDER BY r.start_time, r.id LIMIT 1
+`);
+const insertReservation = db.prepare(`
+  INSERT INTO room_reservations (room_id, user_id, date, start_time, end_time, title, attendees, status, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?)
+`);
+const cancelActiveReservation = db.prepare(`
+  UPDATE room_reservations SET status = 'cancelled' WHERE id = ? AND status = 'reserved'
 `);
 
 const noticeRows = `
@@ -336,6 +423,33 @@ function monday(day) {
   return addDays(day, -((parseDate(day).getUTCDay() + 6) % 7));
 }
 
+function readWeekStart(value) {
+  if (parseDate(value).getUTCDay() !== 1) {
+    throw new HttpError(400, '주간보고 시작일은 월요일이어야 합니다.');
+  }
+  return value;
+}
+
+function selectedWeek(value) {
+  return value === null ? monday(localDate(new Date())) : readWeekStart(value);
+}
+
+function weekLabel(weekStart, offset = 0) {
+  const start = parseDate(weekStart);
+  start.setUTCDate(start.getUTCDate() + offset);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 3);
+  const month = end.getUTCMonth() + 1;
+  const week = Math.ceil(end.getUTCDate() / 7);
+  end.setUTCDate(end.getUTCDate() + 1);
+  const monthDay = (day) => `${twoDigits(day.getUTCMonth() + 1)}/${twoDigits(day.getUTCDate())}`;
+  return `${month}월 ${week}주차(${monthDay(start)} ~ ${monthDay(end)})`;
+}
+
+function emptyWeekPart(entries = []) {
+  return { personalSchedule: '', issues: '', requests: '', entries };
+}
+
 function monthRange(month) {
   if (typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
     throw new HttpError(400, '월은 YYYY-MM 형식으로 입력해 주세요.');
@@ -363,7 +477,11 @@ function seedInitialRows() {
     VALUES (1, '김신입', 'employee', '개발팀', 15),
            (2, '이분석', 'employee', '개발팀', 15),
            (3, '박팀장', 'manager', '개발팀', 20),
-           (4, '박사원', 'employee', '개발팀', 15)
+           (4, '최데이터', 'employee', '데이터팀', 15),
+           (5, '정연구', 'employee', '데이터팀', 15),
+           (6, '한팀장', 'manager', '데이터팀', 20),
+           (7, '강상무', 'executive', '경영진', 20),
+           (8, '박사원', 'employee', '개발팀', 15)
   `);
 
   const today = localDate(new Date());
@@ -387,32 +505,18 @@ function seedInitialRows() {
     }
   }
 
-  // 박사원: 오늘(주말이면 다음 평일) 승인된 연차 1일 → 홈·근태 화면에 "오늘 팀 부재자"로 보임
+  // 박사원(8): 오늘(주말이면 다음 평일) 박팀장(3)이 승인한 연차 1일 → 홈·근태 화면에 "오늘 팀 부재자"로 보임
   let absentDay = today;
   while ([0, 6].includes(parseDate(absentDay).getUTCDay())) absentDay = addDays(absentDay, 1);
   const approvedAt = new Date(`${addDays(today, -1)}T10:00:00`).toISOString();
   db.prepare(`
     INSERT INTO leave_requests (
       user_id, type, start_date, end_date, days, reason, status, approver_id, comment, created_at, decided_at
-    ) VALUES (4, 'annual', ?, ?, 1, '가족 행사', 'approved', 3, '확인했습니다.', ?, ?)
+    ) VALUES (8, 'annual', ?, ?, 1, '가족 행사', 'approved', 3, '확인했습니다.', ?, ?)
   `).run(absentDay, absentDay, approvedAt, approvedAt);
 
-  const previousWeek = addDays(monday(today), -7);
-  const lastFriday = addDays(previousWeek, 4);
-  const submittedAt = new Date(`${lastFriday}T15:00:00`).toISOString();
-  const decidedAt = new Date(`${lastFriday}T17:00:00`).toISOString();
-  const insertApprovedReport = db.prepare(`
-    INSERT INTO weekly_reports (
-      user_id, week_start, items, next_plan, issues, status, approver_id, comment,
-      submitted_at, decided_at, updated_at
-    ) VALUES (?, ?, ?, ?, '', 'approved', 3, '확인했습니다.', ?, ?, ?)
-  `);
-  const seedTasks = [['그룹웨어', '화면 요구사항 정리'], ['업무 분석', '팀 현황 자료 분석']];
-  for (const [index, [project, content]] of seedTasks.entries()) {
-    const items = JSON.stringify([{ project, hours: 40, content }]);
-    insertApprovedReport.run(index + 1, previousWeek, items, '검토 결과를 반영합니다.',
-      submittedAt, decidedAt, decidedAt);
-  }
+  seedWeeklyReports(today);
+  seedReservations(today);
 
   const seedNotices = [
     ['워크샵 해커톤 안내', '워크샵에서 사내 업무 개선 해커톤을 진행합니다.', 1],
@@ -426,6 +530,80 @@ function seedInitialRows() {
       insertAttachment.run(lastInsertRowid, hackathonNotice.name, hackathonNotice.url);
     }
   }
+}
+
+function seedReservations(today) {
+  db.exec(`
+    INSERT INTO rooms (id, office, name, capacity, equipment)
+    VALUES (1, '마곡 사무실', '대회의실', 12, 'TV·화상회의'),
+           (2, '마곡 사무실', '중회의실', 8, 'TV'),
+           (3, '마곡 사무실', '소회의실 A', 4, ''),
+           (4, '마곡 사무실', '소회의실 B', 4, '')
+  `);
+
+  let nextWeekday = addDays(today, 1);
+  while ([0, 6].includes(parseDate(nextWeekday).getUTCDay())) {
+    nextWeekday = addDays(nextWeekday, 1);
+  }
+  const timestamp = new Date(`${today}T00:00:00`).toISOString();
+  const meetings = [
+    [1, 3, today, '10:00', '11:00', '개발팀 주간 회의', '개발팀'],
+    [2, 6, today, '14:00', '15:00', '데이터팀 스프린트 리뷰', '데이터팀'],
+    [3, 1, today, '11:30', '12:00', '그룹웨어 시연 준비', '김신입, 이분석'],
+    [1, 6, nextWeekday, '09:00', '10:00', '데이터 대시보드 공유', '데이터팀'],
+    [2, 2, nextWeekday, '15:00', '16:00', '운영 지원 점검', '개발팀']
+  ];
+  for (const meeting of meetings) insertReservation.run(...meeting, timestamp);
+}
+
+function seedWeeklyReports(today) {
+  const currentWeek = monday(today);
+  const previousWeek = addDays(currentWeek, -7);
+  const previousFriday = addDays(previousWeek, 4);
+  const submittedAt = new Date(`${previousFriday}T15:00:00`).toISOString();
+  const decidedAt = new Date(`${previousFriday}T17:00:00`).toISOString();
+  const insertApproved = db.prepare(`
+    INSERT INTO weekly_reports (
+      user_id, week_start, current_json, next_json, status, approver_id, comment,
+      submitted_at, decided_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'approved', ?, '확인했습니다.', ?, ?, ?)
+  `);
+  const tasks = [
+    [1, 3, '사내 그룹웨어', '요구사항 정리'],
+    [2, 3, 'AI 챗봇 PoC', '질문 유형 정리'],
+    [4, 6, '데이터 대시보드', '가상 지표 구성'],
+    [5, 6, '운영 지원', '점검 항목 정리']
+  ];
+  for (const [userId, managerId, category, content] of tasks) {
+    const current = emptyWeekPart([{ day: 'mon', category, workType: '회사', content, hours: 6 }]);
+    const next = {
+      ...emptyWeekPart([{
+        day: 'tue', category, workType: '재택', content: '다음 단계 검증\n검토 결과 정리', hours: 4
+      }]),
+      personalSchedule: '팀 회의', issues: '없음', requests: '검토 일정 공유'
+    };
+    insertApproved.run(userId, previousWeek, JSON.stringify(current), JSON.stringify(next),
+      managerId, submittedAt, decidedAt, decidedAt);
+  }
+  saveTeamSummary.run('개발팀', previousWeek, 3, '그룹웨어와 챗봇 시연 범위를 확정했습니다.', decidedAt);
+  saveTeamSummary.run('데이터팀', previousWeek, 6, '가상 지표와 점검 항목을 검토했습니다.', decidedAt);
+
+  const timestamp = new Date(`${currentWeek}T00:00:00`).toISOString();
+  const submitted = {
+    ...emptyWeekPart([{
+      day: 'mon', category: '데이터 대시보드', workType: '회사', content: '가상 지표 집계 검증', hours: 6
+    }]),
+    personalSchedule: '없음', issues: '가상 데이터 검증 일정 조정', requests: '시연 일정 공유'
+  };
+  const draft = {
+    ...emptyWeekPart([{
+      day: 'wed', category: '운영 지원', workType: '재택', content: '점검 절차 초안', hours: 3
+    }]),
+    issues: '초안 검토 중'
+  };
+  const emptyNext = JSON.stringify(emptyWeekPart());
+  saveReport.get(4, currentWeek, JSON.stringify(submitted), emptyNext, 'submitted', timestamp, timestamp);
+  saveReport.get(5, currentWeek, JSON.stringify(draft), emptyNext, 'draft', null, timestamp);
 }
 
 function countWeekdays(start, end) {
@@ -550,45 +728,81 @@ function getTeamAttendance(manager) {
   }));
 }
 
-function reportObject(row) {
-  const items = JSON.parse(row.items);
-  const totalHours = items.reduce((total, item) => total + item.hours, 0);
-  return { ...row, items, totalHours };
+function reportWeekFields(weekStart, current, next) {
+  const hours = (part) => part.entries.reduce((total, entry) => total + entry.hours, 0);
+  return {
+    weekStart, weekLabel: weekLabel(weekStart), nextWeekLabel: weekLabel(weekStart, 7),
+    current, next, totalHours: hours(current), nextTotalHours: hours(next)
+  };
+}
+
+function reportObject({ currentJson, nextJson, weekStart, ...row }) {
+  return { ...row, ...reportWeekFields(weekStart, JSON.parse(currentJson), JSON.parse(nextJson)) };
 }
 
 function currentReport(user) {
   const weekStart = monday(localDate(new Date()));
   const row = findWeek.get(user.id, weekStart);
-  return row ? reportObject(row) : { weekStart, status: 'none', items: [], nextPlan: '', issues: '' };
+  if (row) return reportObject(row);
+  const previous = findWeek.get(user.id, addDays(weekStart, -7));
+  const entries = previous ? JSON.parse(previous.nextJson).entries : [];
+  return { ...reportWeekFields(weekStart, emptyWeekPart(entries), emptyWeekPart()), status: 'none' };
 }
 
-function putReport({ userId, weekStart, items, nextPlan, issues, submit = false }) {
-  const user = getUser(readId(userId));
-  if (parseDate(weekStart).getUTCDay() !== 1) {
-    throw new HttpError(400, '주간보고 시작일은 월요일이어야 합니다.');
+const workdays = new Set(['mon', 'tue', 'wed', 'thu', 'fri']);
+const workTypes = new Set(['회사', '재택', '출장', '외근', '휴가']);
+
+function readWeekPart(part) {
+  if (!part || typeof part !== 'object' || !Array.isArray(part.entries)) {
+    throw new HttpError(400, '금주 실적과 차주 계획을 양식에 맞게 입력해 주세요.');
   }
-  if (typeof submit !== 'boolean' || !Array.isArray(items)) {
-    throw new HttpError(400, '업무 항목과 제출 여부를 올바르게 입력해 주세요.');
-  }
-  if (submit && items.length === 0) {
-    throw new HttpError(400, '제출하려면 업무 항목을 한 개 이상 입력해 주세요.');
-  }
-  const tasks = items.map((item) => {
-    if (!item || !Number.isFinite(item.hours) || (submit && item.hours <= 0)) {
-      throw new HttpError(400, '업무 시간을 올바르게 입력해 주세요. 제출 시 0보다 커야 합니다.');
+  const dailyHours = new Map();
+  const entries = part.entries.map((entry) => {
+    if (!entry || !workdays.has(entry.day)) {
+      throw new HttpError(400, '업무 요일은 월요일부터 금요일까지 선택해 주세요.');
     }
+    if (!workTypes.has(entry.workType)) {
+      throw new HttpError(400, '올바른 근무 형태를 선택해 주세요.');
+    }
+    const { day, workType, hours } = entry;
+    if (!Number.isFinite(hours) || hours <= 0 || hours > 24) {
+      throw new HttpError(400, '업무 시간은 0시간 초과 24시간 이하로 입력해 주세요.');
+    }
+    const total = (dailyHours.get(day) ?? 0) + hours;
+    if (total > 24) throw new HttpError(400, '하루 업무 시간 합계는 24시간을 넘을 수 없습니다.');
+    dailyHours.set(day, total);
     return {
-      project: textValue(item.project, '프로젝트를 문자로 입력해 주세요.'),
-      hours: item.hours,
-      content: textValue(item.content, '업무 내용을 문자로 입력해 주세요.')
+      day,
+      category: textValue(entry.category, '업무 구분을 문자로 입력해 주세요.'),
+      workType,
+      content: textValue(entry.content, '업무 내용을 문자로 입력해 주세요.'),
+      hours
     };
   });
-  nextPlan = textValue(nextPlan, '차주 계획을 문자로 입력해 주세요.');
-  issues = textValue(issues, '이슈를 문자로 입력해 주세요.');
+  return {
+    personalSchedule: textValue(part.personalSchedule, '개인일정을 문자로 입력해 주세요.'),
+    issues: textValue(part.issues, '이슈사항을 문자로 입력해 주세요.'),
+    requests: textValue(part.requests, '요청사항을 문자로 입력해 주세요.'),
+    entries
+  };
+}
+
+function putReport({ userId, weekStart, current, next, submit = false }) {
+  const user = getUser(readId(userId));
+  if (user.role !== 'employee') {
+    throw new HttpError(403, '구성원만 개인 주간보고를 작성할 수 있습니다.');
+  }
+  readWeekStart(weekStart);
+  if (typeof submit !== 'boolean') throw new HttpError(400, '제출 여부를 올바르게 입력해 주세요.');
+  const currentPart = readWeekPart(current);
+  const nextPart = readWeekPart(next);
+  if (submit && currentPart.entries.length === 0) {
+    throw new HttpError(400, '제출하려면 금주 실적에 업무 항목을 한 개 이상 입력해 주세요.');
+  }
 
   const timestamp = new Date().toISOString();
   const status = submit ? 'submitted' : 'draft';
-  const saved = saveReport.get(user.id, weekStart, JSON.stringify(tasks), nextPlan, issues,
+  const saved = saveReport.get(user.id, weekStart, JSON.stringify(currentPart), JSON.stringify(nextPart),
     status, submit ? timestamp : null, timestamp);
   if (!saved) throw new HttpError(409, '제출되었거나 승인된 주간보고는 수정할 수 없습니다.');
   return reportObject(findReport.get(saved.id));
@@ -608,6 +822,136 @@ function decideReport(id, status, { approverId, comment }) {
   );
   if (changes === 0) throw new HttpError(409, '제출된 주간보고만 처리할 수 있습니다.');
   return reportObject(findReport.get(id));
+}
+
+function teamReport({ team, managerName }, weekStart, executive = false) {
+  const rows = listTeamReports.all(team, weekStart);
+  const reports = new Map(rows.map((row) => [row.userId, reportObject(row)]));
+  const members = listTeamEmployees.all(team).map((user) => {
+    const report = reports.get(user.userId);
+    const status = report?.status ?? 'none';
+    return {
+      ...user,
+      status,
+      totalHours: report?.totalHours ?? 0,
+      report: (executive && status === 'draft') ? null : (report ?? null)
+    };
+  });
+  const included = [...reports.values()].filter(({ status }) => status === 'submitted' || status === 'approved');
+  const stats = {
+    memberCount: members.length,
+    submittedCount: included.length,
+    approvedCount: included.filter(({ status }) => status === 'approved').length,
+    totalHours: included.reduce((total, report) => total + report.totalHours, 0)
+  };
+  const categoryHours = new Map();
+  const issues = [];
+  const requests = [];
+  const personalSchedules = [];
+  const noteLists = [
+    ['issues', issues], ['requests', requests], ['personalSchedule', personalSchedules]
+  ];
+  for (const { userName, current } of included) {
+    for (const { category, hours } of current.entries) {
+      categoryHours.set(category, (categoryHours.get(category) ?? 0) + hours);
+    }
+    for (const [field, list] of noteLists) {
+      const text = current[field].trim();
+      if (text && text !== '없음') list.push({ userName, text });
+    }
+  }
+  const projectHours = [...categoryHours].map(([category, hours]) => ({ category, hours }))
+    .sort((a, b) => b.hours - a.hours || a.category.localeCompare(b.category, 'ko'));
+  return {
+    team, weekStart, weekLabel: weekLabel(weekStart), managerName, stats, members, projectHours,
+    issues, requests, personalSchedules, teamSummary: findTeamSummary.get(team, weekStart) ?? null
+  };
+}
+
+function getTeamReport(viewer, requestedWeek, requestedTeam) {
+  if (viewer.role !== 'manager' && viewer.role !== 'executive') {
+    throw new HttpError(403, '팀장과 임원만 팀 주간보고를 조회할 수 있습니다.');
+  }
+  const executive = viewer.role === 'executive';
+  const team = requestedTeam ?? (executive ? '' : viewer.team);
+  if (!team.trim()) throw new HttpError(400, '조회할 팀을 선택해 주세요.');
+  if (!executive && team !== viewer.team) {
+    throw new HttpError(403, '자기 팀의 주간보고만 조회할 수 있습니다.');
+  }
+  const weekStart = selectedWeek(requestedWeek);
+  const teamInfo = listReportingTeams.all().find((entry) => entry.team === team);
+  if (!teamInfo) throw new HttpError(404, '팀을 찾을 수 없습니다.');
+  return teamReport(teamInfo, weekStart, executive);
+}
+
+function putTeamSummary({ managerId, weekStart, summary }) {
+  const manager = getManager(readId(managerId));
+  readWeekStart(weekStart);
+  summary = textValue(summary, '팀 종합 의견을 문자로 입력해 주세요.');
+  const updatedAt = new Date().toISOString();
+  saveTeamSummary.run(manager.team, weekStart, manager.id, summary, updatedAt);
+  return { summary, managerName: manager.name, updatedAt };
+}
+
+function executiveWeekly(viewer, requestedWeek) {
+  if (viewer.role !== 'executive') throw new HttpError(403, '임원 권한이 필요합니다.');
+  const weekStart = selectedWeek(requestedWeek);
+  const teams = listReportingTeams.all().map((team) => {
+    const { members, ...summary } = teamReport(team, weekStart, true);
+    return summary;
+  });
+  return { weekStart, weekLabel: weekLabel(weekStart), teams };
+}
+
+function validateReservationTime(time) {
+  if (typeof time !== 'string' || time.length !== 5 || !/^(?:(?:0[89]|1\d):(?:00|30)|20:00)$/.test(time)) {
+    throw new HttpError(400, '예약 시간은 08:00부터 20:00까지 30분 단위로 입력해 주세요.');
+  }
+}
+
+function createReservation({ userId, roomId, date, startTime, endTime, title, attendees = '' }) {
+  const user = getUser(readId(userId));
+  roomId = readId(roomId);
+  if (!findRoom.get(roomId)) throw new HttpError(404, '회의실을 찾을 수 없습니다.');
+  parseDate(date);
+  const now = new Date();
+  if (date < localDate(now)) throw new HttpError(400, '지난 날짜는 예약할 수 없습니다.');
+  validateReservationTime(startTime);
+  validateReservationTime(endTime);
+  if (startTime >= endTime) throw new HttpError(400, '종료 시각은 시작 시각보다 늦어야 합니다.');
+  title = textValue(title, '회의 제목을 입력해 주세요.', true);
+  attendees = textValue(attendees, '참석자는 문자로 입력해 주세요.');
+
+  // Keep the overlap check and insertion under the same SQLite write lock.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const overlap = overlappingReservation.get(roomId, date, endTime, startTime);
+    if (overlap) {
+      throw new HttpError(409,
+        `이미 예약된 시간입니다 (${overlap.startTime}~${overlap.endTime}, ${overlap.userName})`);
+    }
+    const { lastInsertRowid } = insertReservation.run(roomId, user.id, date, startTime, endTime,
+      title, attendees, now.toISOString());
+    const reservation = findReservation.get(lastInsertRowid);
+    db.exec('COMMIT');
+    return reservation;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function cancelReservation(id, { userId }) {
+  const user = getUser(readId(userId));
+  const reservation = findReservation.get(id);
+  if (!reservation) throw new HttpError(404, '회의실 예약을 찾을 수 없습니다.');
+  if (reservation.userId !== user.id) {
+    throw new HttpError(403, '본인의 회의실 예약만 취소할 수 있습니다.');
+  }
+  if (cancelActiveReservation.run(id).changes === 0) {
+    throw new HttpError(409, '이미 취소된 회의실 예약입니다.');
+  }
+  return findReservation.get(id);
 }
 
 function noticeObject(row) {
@@ -633,7 +977,7 @@ function approvalItem(kind, detail) {
   const createdAt = kind === 'leave' ? detail.createdAt : detail.submittedAt;
   const title = kind === 'leave'
     ? `${leaveTypes[detail.type]} ${detail.days}일 (${detail.startDate} ~ ${detail.endDate})`
-    : `주간보고 ${detail.weekStart} 주 (총 ${detail.totalHours}시간)`;
+    : `주간보고 ${detail.weekLabel} (총 ${detail.totalHours}시간)`;
   return { kind, id, userId, userName, title, status, createdAt, decidedAt, detail };
 }
 
@@ -662,7 +1006,8 @@ function home(user) {
     myPendingCount: countMyPending.get(id, id).count,
     approvalPendingCount: role === 'manager' ? approvals('pending', team).length : 0,
     teamOnLeaveToday: teamOnLeave.all(team, today, today),
-    notices: homeNotices.all().map(noticeObject)
+    notices: homeNotices.all().map(noticeObject),
+    myReservationsToday: homeReservations.all(id, today)
   };
 }
 
@@ -685,8 +1030,11 @@ function chatSnapshot(user) {
     },
     myLeaveRequests: listLeave.all(user.id).slice(0, 20).map(leaveLabel),
     myWeeklyReports: listReports.all(user.id).slice(0, 6).map(reportObject)
-      .map(({ weekStart, status, items, totalHours, nextPlan, issues, comment }) =>
-        ({ weekStart, status, items, totalHours, nextPlan, issues, comment })),
+      .map(({ weekStart, weekLabel, status, current, next, totalHours, nextTotalHours, comment }) =>
+        ({ weekStart, weekLabel, status, current, next, totalHours, nextTotalHours, comment })),
+    myUpcomingReservations: listMyReservations.all(user.id, today).slice(0, 20)
+      .map(({ date, roomName, startTime, endTime, title, attendees }) =>
+        ({ date, roomName, startTime, endTime, title, attendees })),
     teamLeaveThisMonth: calendarLeave.all(user.team, ...monthRange(thisMonth).reverse())
   };
 }
@@ -703,6 +1051,15 @@ async function handleApi(req, res, pathname, query) {
         return json(res, 200, home(user()));
       case '/api/notices':
         return json(res, 200, listNotices.all().map(noticeObject));
+      case '/api/rooms':
+        return json(res, 200, listRooms.all());
+      case '/api/room-reservations': {
+        const date = query.get('date');
+        parseDate(date);
+        return json(res, 200, listDayReservations.all(date));
+      }
+      case '/api/room-reservations/mine':
+        return json(res, 200, listMyReservations.all(user().id, localDate(new Date())));
       case '/api/attendance':
         return json(res, 200, getMonthAttendance(user(), month));
       case '/api/attendance/team':
@@ -711,6 +1068,14 @@ async function handleApi(req, res, pathname, query) {
         return json(res, 200, currentReport(user()));
       case '/api/weekly-reports':
         return json(res, 200, listReports.all(user().id).map(reportObject));
+      case '/api/weekly-reports/team': {
+        const viewer = getUser(readId(query.get('viewerId')));
+        return json(res, 200, getTeamReport(viewer, query.get('weekStart'), query.get('team')));
+      }
+      case '/api/executive/weekly': {
+        const viewer = getUser(readId(query.get('executiveId')));
+        return json(res, 200, executiveWeekly(viewer, query.get('weekStart')));
+      }
       case '/api/leave-requests':
         return json(res, 200, listLeave.all(user().id));
       case '/api/leave-calendar': {
@@ -729,8 +1094,13 @@ async function handleApi(req, res, pathname, query) {
     const match = /^\/api\/users\/([^/]+)\/balance$/.exec(pathname);
     if (match) return json(res, 200, balance(getUser(readId(match[1]))));
   }
-  if (req.method === 'PUT' && pathname === '/api/weekly-reports') {
-    return json(res, 200, putReport(await readJson(req)));
+  if (req.method === 'PUT') {
+    if (pathname === '/api/weekly-reports') {
+      return json(res, 200, putReport(await readJson(req)));
+    }
+    if (pathname === '/api/team-summaries') {
+      return json(res, 200, putTeamSummary(await readJson(req)));
+    }
   }
   if (req.method === 'POST') {
     switch (pathname) {
@@ -742,15 +1112,21 @@ async function handleApi(req, res, pathname, query) {
         return json(res, 200, markAttendance(false, await readJson(req)));
       case '/api/leave-requests':
         return json(res, 201, createLeave(await readJson(req)));
+      case '/api/room-reservations':
+        return json(res, 201, createReservation(await readJson(req)));
       case '/api/chat': {
         const { userId, text } = await readJson(req);
         const chatUser = getUser(readId(userId));
         const message = textValue(text, '메시지를 입력해 주세요.', true);
-        if (message.length > 500) throw new HttpError(400, '메시지는 500자 이내로 입력해 주세요.');
+        if (text.length > 500) throw new HttpError(400, '메시지는 500자 이내로 입력해 주세요.');
         return json(res, 200, await assistant.respond(message, {
           user: chatUser,
           home: () => home(chatUser),
           pendingApprovals: () => approvals('pending', chatUser.team),
+          teamWeekly: () => getTeamReport(chatUser, null, null),
+          executiveWeekly: () => executiveWeekly(chatUser, null),
+          rooms: () => listRooms.all(),
+          reservations: (date) => listDayReservations.all(date),
           snapshot: () => chatSnapshot(chatUser)
         }));
       }
@@ -760,6 +1136,10 @@ async function handleApi(req, res, pathname, query) {
           { type, startDate, endDate }, typeof avoid === 'string' ? avoid : ''
         ));
       }
+    }
+    const reservation = /^\/api\/room-reservations\/([^/]+)\/cancel$/.exec(pathname);
+    if (reservation) {
+      return json(res, 200, cancelReservation(readId(reservation[1]), await readJson(req)));
     }
     const leave = /^\/api\/leave-requests\/([^/]+)\/(approve|reject|cancel)$/.exec(pathname);
     if (leave) {

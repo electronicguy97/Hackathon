@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>사내 그룹웨어 · 홈 · 출퇴근 · 주간보고 · 연차 · 승인</title>
+  <title>사내 그룹웨어 · 홈 · 출퇴근 · 주간보고 · 연차 · 승인 · 회의실 예약</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="chatbot.css">
 </head>
@@ -77,6 +77,17 @@
           <span class="nav-label">승인</span>
           <span id="nav-approvals-badge" class="nav-badge is-hidden" hidden>0</span>
         </a>
+
+        <a href="#/rooms" class="sidebar-link" data-route="rooms">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 21h18"></path>
+            <path d="M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16"></path>
+            <path d="M9 9h6"></path>
+            <path d="M9 13h6"></path>
+          </svg>
+          <span class="nav-label">회의실 예약</span>
+          <span class="nav-tag">마곡</span>
+        </a>
       </nav>
     </aside>
 
@@ -91,7 +102,7 @@
   </div>
 
   <div id="modal-backdrop" class="modal-backdrop is-hidden" hidden>
-    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div id="modal-dialog" class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div class="modal-header">
         <h3 id="modal-title" class="modal-title"></h3>
         <button type="button" id="modal-close-btn" class="modal-close" aria-label="창 닫기">&times;</button>
