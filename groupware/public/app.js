@@ -3260,6 +3260,7 @@
     state.attendanceMonth = getLocalMonthISO();
     state.leaveCalendarMonth = getLocalMonthISO();
     state.roomsDate = getLocalTodayISO();
+    window.groupwareRefresh = () => renderCurrentRoute();
     bindGlobalEvents();
     initUsersAndStart();
   }

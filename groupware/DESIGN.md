@@ -220,6 +220,40 @@ groupware/
 
 `/api/home` 응답에 `myReservationsToday: [{id, roomName, startTime, endTime, title}]`(오늘 내 예약, 시각 순)를 추가한다.
 
+### 업무 챗봇 (우측 하단, 팀원 kimzoo 구현을 확장)
+
+- 파일: `assistant.js`(문장 해석·답변), `server.js`의 `/api/chat`, `/api/chat/story`, `public/chatbot.js`·`chatbot.css`
+- LLM은 선택 사항: `groupware/.env`의 `LLM_PROVIDER`(anthropic | azure | openai). 비었거나 실패·시간 초과면 규칙 기반 해석으로 대체. 테스트는 규칙 기반으로만 한다.
+- 챗봇은 동작을 제안만 하고, 실행은 사용자가 카드에서 확인한 뒤 화면이 기존 API를 호출한다.
+
+| 메서드 | 경로 | 요청 | 응답 |
+|---|---|---|---|
+| POST | `/api/chat` | `{userId, text}` (500자 이내) | `{reply, source: "rule"\|"llm", warning, action}` |
+| POST | `/api/chat/story` | `{type, startDate, endDate, avoid}` | `{story, source}` |
+
+`action.kind`와 payload:
+
+| kind | payload | 화면 동작 |
+|---|---|---|
+| `navigate` | `{route, label, auto}` | route: home, attendance, weekly, leave, approvals, rooms |
+| `check_in`, `check_out` | 없음 | 출퇴근 API 호출 |
+| `leave` | `{payload: {type, startDate, endDate, reason}, days, story}` | 연차 신청 API |
+| `weekly` | `{payload: {weekStart, current: {entries, issues, requests, personalSchedule}, next: {entries}}, canSubmit}` | 아래 병합 규칙 후 `PUT /api/weekly-reports` |
+| `approvals` | `{items: [{kind, id, userName, title, reason}]}` | 팀장만, 승인·반려 API |
+| `room` | `{payload: {roomId, roomName, date, startTime, endTime, title, attendees}}` | `POST /api/room-reservations` |
+
+주간보고 병합 규칙(챗봇은 일부만 말하므로 기존 보고에 더한다):
+- 화면이 `GET /api/weekly-reports/current`로 현재 보고(또는 템플릿)를 받아, `current.entries`·`next.entries`에 챗봇 entries를 덧붙이고, issues·requests·personalSchedule은 챗봇 값이 비어 있지 않을 때만 덮어쓴 뒤 저장한다.
+- entries의 day가 문장에 없으면 금주는 오늘 요일(주말이면 금요일), 차주는 월요일. workType이 없으면 `회사`. 차주 entries에 시간이 없으면 hours 0으로 두고 `canSubmit: false`(임시저장만).
+- 예: "주간보고: 월 사내 그룹웨어 7시간 화면 설계, 운영 지원 1시간 서버 점검 / 차주: 화 AI 챗봇 PoC 8시간 / 이슈: 없음"
+
+역할별 처리:
+- 팀장의 주간보고 요청: 개인 보고 대신 팀 종합 화면 안내(navigate weekly)와 제출 현황 요약(제출 n/m명)
+- 임원: 주간보고 요청은 팀별 현황 요약(팀별 제출률·총 시간) + navigate weekly. 출퇴근·연차·승인 요청은 "임원 메뉴에서 지원하지 않는 기능"으로 안내
+- 회의실: "내일 오후 3시 소회의실 A 1시간 예약, 제목 스프린트 회의" → 날짜(오늘·내일·모레·요일·M월 D일), 시각(오전·오후 H시(반), HH:MM), 길이(N시간·N분, 기본 1시간), 회의실 이름, 제목(없으면 "회의")을 해석. 제안 전에 그날 예약과 겹치는지 확인해, 겹치면 같은 시간에 비어 있는 다른 회의실을 알려 준다. "오늘 회의실 현황"은 그날 예약 요약 + navigate rooms
+- "오늘 요약"(status)에 오늘 내 회의를 추가. 임원은 팀별 주간보고 요약
+- 질문 답변용 snapshot에 다가오는 내 회의실 예약을 포함
+
 ### 승인 (연차 + 주간보고 통합)
 
 | 메서드 | 경로 | 응답 |

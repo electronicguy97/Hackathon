@@ -1005,6 +1005,9 @@ function chatSnapshot(user) {
     myWeeklyReports: listReports.all(user.id).slice(0, 6).map(reportObject)
       .map(({ weekStart, weekLabel, status, current, next, totalHours, nextTotalHours, comment }) =>
         ({ weekStart, weekLabel, status, current, next, totalHours, nextTotalHours, comment })),
+    myUpcomingReservations: listMyReservations.all(user.id, today).slice(0, 20)
+      .map(({ date, roomName, startTime, endTime, title, attendees }) =>
+        ({ date, roomName, startTime, endTime, title, attendees })),
     teamLeaveThisMonth: calendarLeave.all(user.team, ...monthRange(thisMonth).reverse())
   };
 }
@@ -1088,11 +1091,15 @@ async function handleApi(req, res, pathname, query) {
         const { userId, text } = await readJson(req);
         const chatUser = getUser(readId(userId));
         const message = textValue(text, '메시지를 입력해 주세요.', true);
-        if (message.length > 500) throw new HttpError(400, '메시지는 500자 이내로 입력해 주세요.');
+        if (text.length > 500) throw new HttpError(400, '메시지는 500자 이내로 입력해 주세요.');
         return json(res, 200, await assistant.respond(message, {
           user: chatUser,
           home: () => home(chatUser),
           pendingApprovals: () => approvals('pending', chatUser.team),
+          teamWeekly: () => getTeamReport(chatUser, null, null),
+          executiveWeekly: () => executiveWeekly(chatUser, null),
+          rooms: () => listRooms.all(),
+          reservations: (date) => listDayReservations.all(date),
           snapshot: () => chatSnapshot(chatUser)
         }));
       }

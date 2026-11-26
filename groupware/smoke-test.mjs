@@ -13,6 +13,7 @@ const currentReportPath = `/api/weekly-reports/current?userId=${employeeId}`;
 const reportsPath = '/api/weekly-reports';
 const teamReportPath = `${reportsPath}/team?viewerId=${managerId}`;
 const executivePath = `/api/executive/weekly?executiveId=${executiveId}`;
+const chatPath = '/api/chat';
 const minePath = `/api/approvals/mine?userId=${employeeId}`;
 const processedPath = `/api/approvals/history?approverId=${managerId}`;
 const application = {
@@ -89,6 +90,12 @@ async function request(path, expectedStatus = 200, body, method = 'POST') {
   return result;
 }
 
+async function chat(text, userId = employeeId) {
+  const response = await request(chatPath, 200, { userId, text });
+  expectFields(response, { source: 'rule', warning: null });
+  return response;
+}
+
 async function step(name, test) {
   try {
     await test();
@@ -151,6 +158,12 @@ await step('Seeded attendance records and monthly summaries agree for all seven 
       if (userId === employeeId) expect(summary.lateCount, 1, 'employee seeded late count');
     }
   }
+});
+
+await step('Chat proposes check-in without changing attendance', async () => {
+  const response = await chat('출근');
+  expectFields(response.action, { kind: 'check_in' });
+  expect((await request(employeeHomePath)).attendance.status, 'none', 'chat never checks in directly');
 });
 
 await step('Check-in updates home and duplicate check-in returns 409', async () => {
@@ -613,4 +626,113 @@ await step('Cancellation is owner-only, removes the active booking and frees the
   await request(`${reservationsPath}/${bookedToday.id}/cancel`, 200, check);
   const home = await request(employeeHomePath);
   expect(home.myReservationsToday.some((row) => row.id === bookedToday.id), false, 'cancelled reservation in home');
+});
+
+await step('Chat proposes a half-day leave with the parsed date and reason', async () => {
+  const date = nextBooking.date;
+  const response = await chat(`${date} 오후 반차 신청, 사유: 개인 일정`);
+  expectFields(response.action, { kind: 'leave', days: 0.5, story: null });
+  expectFields(response.action.payload, { type: 'half_pm', startDate: date, endDate: date, reason: '개인 일정' });
+});
+
+await step('Chat proposes weekly entries, and merging them with the template can be submitted', async () => {
+  const reportUserId = 2;
+  const reportPath = `${reportsPath}/current?userId=${reportUserId}`;
+  const example = '주간보고: 월 사내 그룹웨어 7시간 화면 설계, 운영 지원 1시간 서버 점검 / 차주: 화 AI 챗봇 PoC 8시간 / 이슈: 없음';
+  const response = await chat(example, reportUserId);
+  expectFields(response.action, { kind: 'weekly', canSubmit: true });
+  const { current, next, weekStart: proposalWeek } = response.action.payload;
+  expect(proposalWeek, weekStart, 'chat proposal week');
+  expect(current.entries.length, 2, 'current entries');
+  expect(next.entries.length, 1, 'next entries');
+  expectFields(current.entries[0], {
+    day: 'mon', category: '사내 그룹웨어', workType: '회사', content: '화면 설계', hours: 7
+  });
+  expectFields(current.entries[1], {
+    day: 'mon', category: '운영 지원', workType: '회사', content: '서버 점검', hours: 1
+  });
+  expectFields(next.entries[0], { day: 'tue', category: 'AI 챗봇 PoC', workType: '회사', hours: 8 });
+  expectFields(current, { issues: '없음', requests: '', personalSchedule: '' });
+
+  const template = await request(reportPath);
+  expect(template.status, 'none', 'chat never writes a report');
+  const incomplete = await chat(
+    '주간보고: 재택 운영 지원 1시간 서버 점검 / 차주: 사내 그룹웨어 / 요청사항: 결과 공유 / 개인일정: 금요일 반차',
+    reportUserId
+  );
+  expectFields(incomplete.action, { kind: 'weekly', canSubmit: false });
+  const { current: partialCurrent, next: partialNext } = incomplete.action.payload;
+  const weekday = new Date(`${today}T00:00:00Z`).getUTCDay();
+  const defaultDay = ['fri', 'mon', 'tue', 'wed', 'thu', 'fri', 'fri'][weekday];
+  expectFields(partialCurrent.entries[0], { day: defaultDay, workType: '재택', category: '운영 지원' });
+  expectFields(partialCurrent, { requests: '결과 공유', personalSchedule: '금요일 반차' });
+  expectFields(partialNext.entries[0], { day: 'mon', workType: '회사', hours: 0 });
+  const longWeekday = await chat('주간보고: 수요일 운영 지원 3시간 서버 점검', reportUserId);
+  expect(longWeekday.action.payload.current.entries[0].day, 'wed', '요일 suffix');
+
+  const mergedCurrent = { ...template.current, entries: [...template.current.entries, ...current.entries] };
+  for (const field of ['issues', 'requests', 'personalSchedule']) {
+    if (current[field]) mergedCurrent[field] = current[field];
+  }
+  const saved = await request(reportsPath, 200, {
+    userId: reportUserId, weekStart: proposalWeek, submit: true,
+    current: mergedCurrent, next: { ...template.next, entries: [...template.next.entries, ...next.entries] }
+  }, 'PUT');
+  expectFields(saved, { status: 'submitted', totalHours: template.totalHours + 8, nextTotalHours: 8 });
+  expect(saved.current.issues, '없음', 'merged issues');
+});
+
+await step('Chat gives managers and executives weekly summaries with navigation', async () => {
+  const manager = await chat('주간보고', managerId);
+  expectFields(manager.action, { kind: 'navigate', route: 'weekly' });
+  expect(manager.reply.includes('제출 2/2명'), true, 'manager team counts');
+  const executive = await chat('주간보고 현황 알려줘', executiveId);
+  expectFields(executive.action, { kind: 'navigate', route: 'weekly' });
+  for (const phrase of ['개발팀', '데이터팀', '%', '총']) {
+    expect(executive.reply.includes(phrase), true, `executive weekly mentions ${phrase}`);
+  }
+  for (const text of ['출근', '퇴근', `${nextBooking.date} 연차`, '결재 대기 보여줘', '출퇴근 화면 열어줘']) {
+    const response = await chat(text, executiveId);
+    expect(response.action, null, 'executive restricted action');
+    expect(response.reply.includes('임원 메뉴에서 지원하지 않는 기능'), true, 'executive role message');
+  }
+});
+
+await step('Chat proposes a room and suggests only free rooms when that slot is taken', async () => {
+  const text = '다음 평일 15:00 소회의실 A 1시간 예약, 제목 스프린트 회의';
+  const proposal = await chat(text);
+  expectFields(proposal.action, { kind: 'room' });
+  expectFields(proposal.action.payload, {
+    roomId: 3, roomName: '소회의실 A', date: nextBooking.date, startTime: '15:00', endTime: '16:00',
+    title: '스프린트 회의', attendees: ''
+  });
+  const rows = await request(`${reservationsPath}?date=${nextBooking.date}`);
+  expect(rows.some((row) => row.roomId === 3 && row.startTime === '15:00'), false, 'chat never books a room');
+  await request(reservationsPath, 201, { userId: employeeId, ...proposal.action.payload });
+  const conflict = await chat(text);
+  expect(conflict.action, null, 'no overlapping booking proposal');
+  expect(conflict.reply.includes('대회의실, 소회의실 B'), true, 'only available alternative rooms');
+  expect(conflict.reply.includes('중회의실'), false, 'occupied room excluded from alternatives');
+
+  const halfHour = await chat('오늘 오후 4시 반 소회의실 A 30분 예약, 참석자 김신입, 이분석');
+  expectFields(halfHour.action.payload, {
+    date: today, startTime: '16:30', endTime: '17:00', title: '회의', attendees: '김신입, 이분석'
+  });
+});
+
+await step('Chat opens rooms and reports room availability and today’s meetings', async () => {
+  const nav = await chat('회의실 예약 화면 열어줘');
+  expectFields(nav.action, { kind: 'navigate', route: 'rooms', label: '회의실 예약', auto: true });
+  const rooms = await chat('오늘 회의실 현황');
+  expectFields(rooms.action, { kind: 'navigate', route: 'rooms', auto: false });
+  expect(rooms.reply.includes('대회의실 10:00~11:00 개발팀 주간 회의'), true, 'room status from seeded reservations');
+  const status = await chat('오늘 요약');
+  expect(status.reply.includes('오늘 내 회의'), true, 'meetings in employee status');
+  expect(status.reply.includes('그룹웨어 시연 준비'), true, 'my meeting title in status');
+  const executive = await chat('오늘 요약', executiveId);
+  expect(executive.reply.includes('개발팀') && executive.reply.includes('데이터팀'), true, 'executive team status');
+});
+
+await step('Chat returns 400 for messages over 500 characters', async () => {
+  await request(chatPath, 400, { userId: employeeId, text: '가'.repeat(501) });
 });
