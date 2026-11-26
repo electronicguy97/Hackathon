@@ -5,6 +5,14 @@ const { DatabaseSync } = require('node:sqlite');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// groupware/.env 가 있으면 환경변수로 읽음 (LLM 키 등, git 제외)
+try {
+  process.loadEnvFile(path.join(__dirname, '.env'));
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+const assistant = require('./assistant');
+
 const port = Number(process.env.PORT ?? 3000);
 const publicDir = path.join(__dirname, 'public');
 const dataDir = path.join(__dirname, 'data');
@@ -631,6 +639,31 @@ function home(user) {
   };
 }
 
+// 챗봇이 DB 조회로 바로 답하지 못한 질문을 LLM 에 넘길 때 근거로 주는 "내 데이터" 묶음
+function chatSnapshot(user) {
+  const today = localDate(new Date());
+  const thisMonth = today.slice(0, 7);
+  const lastMonth = localDate(new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1)).slice(0, 7);
+  const leaveLabel = (row) => ({
+    type: leaveTypes[row.type] ?? row.type, startDate: row.startDate, endDate: row.endDate,
+    days: row.days, reason: row.reason, status: row.status, comment: row.comment
+  });
+  return {
+    home: home(user),
+    notices: listNotices.all().map(noticeObject).map(({ title, body, pinned, createdAt, authorName }) =>
+      ({ title, body, pinned, createdAt, authorName })),
+    attendance: {
+      [thisMonth]: getMonthAttendance(user, thisMonth),
+      [lastMonth]: getMonthAttendance(user, lastMonth).summary
+    },
+    myLeaveRequests: listLeave.all(user.id).slice(0, 20).map(leaveLabel),
+    myWeeklyReports: listReports.all(user.id).slice(0, 6).map(reportObject)
+      .map(({ weekStart, status, items, totalHours, nextPlan, issues, comment }) =>
+        ({ weekStart, status, items, totalHours, nextPlan, issues, comment })),
+    teamLeaveThisMonth: calendarLeave.all(user.team, ...monthRange(thisMonth).reverse())
+  };
+}
+
 async function handleApi(req, res, pathname, query) {
   if (req.method === 'GET') {
     const user = () => getUser(readId(query.get('userId')));
@@ -682,6 +715,24 @@ async function handleApi(req, res, pathname, query) {
         return json(res, 200, markAttendance(false, await readJson(req)));
       case '/api/leave-requests':
         return json(res, 201, createLeave(await readJson(req)));
+      case '/api/chat': {
+        const { userId, text } = await readJson(req);
+        const chatUser = getUser(readId(userId));
+        const message = textValue(text, '메시지를 입력해 주세요.', true);
+        if (message.length > 500) throw new HttpError(400, '메시지는 500자 이내로 입력해 주세요.');
+        return json(res, 200, await assistant.respond(message, {
+          user: chatUser,
+          home: () => home(chatUser),
+          pendingApprovals: () => approvals('pending', chatUser.team),
+          snapshot: () => chatSnapshot(chatUser)
+        }));
+      }
+      case '/api/chat/story': {
+        const { type, startDate, endDate, avoid } = await readJson(req);
+        return json(res, 200, await assistant.writeStory(
+          { type, startDate, endDate }, typeof avoid === 'string' ? avoid : ''
+        ));
+      }
     }
     const leave = /^\/api\/leave-requests\/([^/]+)\/(approve|reject|cancel)$/.exec(pathname);
     if (leave) {
@@ -760,4 +811,7 @@ http.createServer(async (req, res) => {
       json(res, 500, { error: '요청을 처리하는 중 오류가 발생했습니다.' });
     }
   }
-}).listen(port, () => console.log(`Groupware is listening on port ${port}`));
+}).listen(port, () => {
+  console.log(`Groupware is listening on port ${port}`);
+  console.log(`챗봇 해석: ${assistant.providerName() ?? '규칙 기반 (LLM_PROVIDER 미설정)'}`);
+});
