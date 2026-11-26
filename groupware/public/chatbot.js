@@ -15,6 +15,7 @@
     '오늘 요약',
     '다음 주 월화 연차 쓸게요',
     '출근',
+    '주간보고 초안 써줘',
     '주간보고: 월 사내 그룹웨어 7시간 화면 설계, 운영 지원 1시간 서버 점검 / 차주: 화 AI 챗봇 PoC 8시간 / 이슈: 없음',
     '내일 오후 3시 소회의실 A 1시간 예약, 제목 스프린트 회의',
   ];
@@ -302,7 +303,9 @@
       personalSchedule: pickText('personalSchedule'),
       issues: pickText('issues'),
       requests: pickText('requests'),
-      entries: [...baseEntries, ...patchEntries],
+      // 같은 요일·구분·내용의 행은 한 번만 (초안을 두 번 저장해도 중복되지 않게)
+      entries: [...baseEntries, ...patchEntries.filter((p) => !baseEntries.some((b) =>
+        b.day === p.day && b.category === p.category && b.content === p.content))],
     };
   }
 
@@ -428,14 +431,19 @@
       const nextPatch = p.next || {};
 
       const card = h('div', { className: 'cb-card' },
+        action.draft ? h('div', { className: 'cb-label', text: '초안 (기존 보고에 아래 항목을 더해요)' }) : null,
         renderGroupedWeeklySection('금주 실적', curPatch.entries),
         renderGroupedWeeklySection('차주 계획', nextPatch.entries),
         curPatch.personalSchedule ? row('개인일정', curPatch.personalSchedule) : null,
+        nextPatch.personalSchedule ? row('차주 개인일정', nextPatch.personalSchedule) : null,
         curPatch.issues ? row('이슈사항', curPatch.issues) : null,
         curPatch.requests ? row('요청/전달', curPatch.requests) : null);
 
       const submit = h('button', { type: 'button', className: 'cb-btn cb-primary', text: '제출', disabled: !action.canSubmit });
-      const draft = h('button', { type: 'button', className: 'cb-btn', text: '임시저장' });
+      const draft = h('button', {
+        type: 'button', className: action.draft ? 'cb-btn cb-primary' : 'cb-btn',
+        text: action.draft ? '초안 임시저장' : '임시저장'
+      });
       const cancel = h('button', { type: 'button', className: 'cb-btn', text: '취소' });
       const buttons = action.canSubmit ? [submit, draft, cancel] : [draft, cancel];
 
