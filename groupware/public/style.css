@@ -1237,3 +1237,20 @@ textarea.form-control {
     font-size: 0.72rem;
   }
 }
+
+/* 공지 첨부파일 */
+.notice-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--border);
+}
+.notice-attachment {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: none;
+  word-break: break-all;
+}
+.notice-attachment:hover { text-decoration: underline; }
+.notice-clip { font-size: 0.85rem; }

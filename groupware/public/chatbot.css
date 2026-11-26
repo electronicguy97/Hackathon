@@ -180,3 +180,22 @@
   .cb-fab { right: 16px; bottom: 16px; }
   .cb-panel { right: 8px; left: 8px; bottom: 82px; width: auto; height: calc(100vh - 110px); }
 }
+
+/* 답장 대기 중 점 세 개 */
+.cb-msg.is-typing .cb-bubble { display: flex; gap: 4px; padding: 12px 14px; }
+.cb-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-subtle);
+  animation: cb-bounce 1.2s infinite ease-in-out;
+}
+.cb-dot:nth-child(2) { animation-delay: 0.15s; }
+.cb-dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes cb-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cb-dot { animation: none; opacity: 0.6; }
+}

@@ -441,6 +441,13 @@
     titleInput.focus();
   }
 
+  function noticeAttachments(list) {
+    if (!Array.isArray(list) || list.length === 0) return null;
+    return el('div', { className: 'notice-attachments' }, list.map((a) =>
+      el('a', { className: 'notice-attachment', href: a.url, target: '_blank', rel: 'noopener' }, ['📎 ', a.name])
+    ));
+  }
+
   async function openNoticeDetailModal(targetNoticeId) {
     openModal('공지사항', el('div', { className: 'state-box', textContent: '공지 내용을 불러오는 중입니다...' }));
     try {
@@ -461,6 +468,7 @@
             }),
           ]),
           el('div', { className: 'notice-full-body', textContent: notice.body || '' }),
+          noticeAttachments(notice.attachments),
         ]));
         return;
       }
@@ -480,6 +488,7 @@
             }),
           ]),
           el('div', { className: 'notice-full-body', textContent: n.body || '' }),
+          noticeAttachments(n.attachments),
         ])
       )));
     } catch (err) {
@@ -659,6 +668,9 @@
               el('div', { className: 'notice-title-wrap' }, [
                 n.pinned ? makeBadge('고정', 'badge badge-pinned') : null,
                 el('span', { className: 'notice-title-text', textContent: n.title }),
+                n.attachments && n.attachments.length
+                  ? el('span', { className: 'notice-clip', title: '첨부파일', textContent: '📎' })
+                  : null,
               ]),
               el('span', { className: 'notice-date', textContent: formatIsoDate(n.createdAt) }),
             ]),

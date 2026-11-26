@@ -68,9 +68,23 @@ function classifyByRules(text) {
   if (routeByKeywords(t) && /(열어|열기|이동|가\s*줘|가자|띄워|들어가|켜\s*줘|탭|메뉴|화면|페이지)/.test(t)) {
     return 'navigate';
   }
+  // "출퇴근 기록 보여줘", "연차 내역 확인" → 화면 이동 (결재 목록은 챗봇에서 바로 승인하도록 제외)
+  if (routeByKeywords(t) && /(기록|내역|이력|캘린더|달력)/.test(t) && /(보여|보기|확인|볼래|봐)/.test(t) &&
+      !/(결재|승인)/.test(t)) {
+    return 'navigate';
+  }
+  // 메뉴 이름만 말한 경우("출퇴근", "근태", "주간보고", "결재함") → 화면 이동
+  let bare = t.replace(/[\s.?!~]/g, '');
+  for (let prev = ''; prev !== bare;) {
+    prev = bare;
+    bare = bare.replace(/(화면|메뉴|탭|페이지|으로|로|좀|요|가자|보기|창)$/, '');
+  }
+  if (/^(홈|대시보드|메인|출퇴근|근태|출근부|주간보고|위클리|주보|타임시트|연차|휴가|반차|승인|결재|결재함|공지|공지사항|캘린더|달력)$/.test(bare)) {
+    return 'navigate';
+  }
   const asking = /(남은|잔여|몇\s*일|며칠|얼마|상태|했(나|어|니)|됐(나|어|니)|알려|보여|언제|\?)/.test(t);
 
-  if (/(출근|퇴근)/.test(t) && !asking) {
+  if (/(출근|퇴근)/.test(t) && !/출퇴근/.test(t) && !asking) {
     return /퇴근/.test(t) ? 'check_out' : 'check_in';
   }
   if (/(주간\s*보고|위클리|주보)/.test(t) && !(asking && !/\d\s*(시간|h)/i.test(t))) {
@@ -559,9 +573,6 @@ async function answerQuestion(text, snapshot, today) {
   return { answer: answer.trim(), route: ROUTES.includes(route) ? route : null };
 }
 
-const openScreen = (route, auto = false) =>
-  (route ? { kind: 'navigate', route, label: ROUTE_LABEL[route], auto } : null);
-
 function statusReply(h) {
   const a = h.attendance;
   const att = a.status === 'none' ? '아직 출근 전'
@@ -581,8 +592,24 @@ function statusReply(h) {
   return lines.join('\n');
 }
 
+// 의도별 기본 화면. 메뉴와 관련된 말이면 답장보다 먼저 그 화면으로 전환한다.
+const INTENT_ROUTE = {
+  leave_request: 'leave',
+  weekly_report: 'weekly',
+  check_in: 'attendance',
+  check_out: 'attendance',
+  approvals: 'approvals'
+};
+
 async function respond(text, ctx, today = localToday()) {
   const parsed = await interpret(text, today);
+  const out = await respondCore(text, ctx, parsed, today);
+  // 우선순위: 답변이 고른 화면 → 의도별 화면 → LLM 이 고른 화면 → 키워드("출퇴근", "주간보고" …)
+  const screen = out.screen ?? INTENT_ROUTE[parsed.intent] ?? parsed.route ?? routeByKeywords(text) ?? null;
+  return { ...out, screen };
+}
+
+async function respondCore(text, ctx, parsed, today) {
   const base = { source: parsed.source, warning: parsed.warning };
   const h = ctx.home();
 
@@ -659,21 +686,18 @@ async function respond(text, ctx, today = localToday()) {
     case 'navigate': {
       const route = parsed.route ?? routeByKeywords(text);
       if (!route) return { ...base, reply: '어느 화면을 열까요? 홈, 출퇴근, 주간보고, 연차, 승인 중에서 말씀해 주세요.' };
-      return { ...base, reply: `${ROUTE_LABEL[route]} 화면으로 이동할게요.`, action: openScreen(route, true) };
+      return { ...base, reply: `${ROUTE_LABEL[route]} 화면으로 이동했어요.`, screen: route };
     }
 
-    case 'status': {
-      // 요약에 없는 걸 물었으면(예: 지난달 지각) 관련 화면 버튼을 같이 준다
-      const route = parsed.route ?? routeByKeywords(text);
-      return { ...base, reply: statusReply(h), action: route && route !== 'home' ? openScreen(route) : null };
-    }
+    case 'status':
+      return { ...base, reply: statusReply(h) };
 
     default: {
-      // question, help: API 가 있으면 내 데이터로 답하고, 없거나 실패하면 관련 화면을 안내
+      // question, help: API 가 있으면 내 데이터로 답하고, 없거나 실패하면 관련 화면으로 안내
       if (providerName() && ctx.snapshot) {
         try {
           const { answer, route } = await answerQuestion(text, ctx.snapshot(), today);
-          return { ...base, source: 'llm', reply: answer, action: openScreen(route) };
+          return { ...base, source: 'llm', reply: answer, screen: route ?? undefined };
         } catch (error) {
           console.warn(`[assistant] 질문 답변 실패 → 안내로 대체: ${error.message}`);
           base.warning = 'AI 답변에 실패했어요.';
@@ -681,11 +705,7 @@ async function respond(text, ctx, today = localToday()) {
       }
       const route = parsed.route ?? routeByKeywords(text);
       if (route) {
-        return {
-          ...base,
-          reply: `바로 답하기는 어려운 질문이에요. ${ROUTE_LABEL[route]} 화면에서 확인해 보시겠어요?`,
-          action: openScreen(route)
-        };
+        return { ...base, reply: `바로 답하기는 어려운 질문이라 ${ROUTE_LABEL[route]} 화면을 열었어요. 여기서 확인해 보세요.` };
       }
       return { ...base, reply: HELP };
     }

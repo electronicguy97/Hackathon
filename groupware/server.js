@@ -73,6 +73,12 @@ db.exec(`
     pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS notice_attachments (
+    id INTEGER PRIMARY KEY,
+    notice_id INTEGER NOT NULL REFERENCES notices(id),
+    name TEXT NOT NULL,
+    url TEXT NOT NULL
+  );
 `);
 
 const leaveRows = `
@@ -183,6 +189,13 @@ const noticeRows = `
   FROM notices n JOIN users u ON u.id = n.author_id
 `;
 const findNotice = db.prepare(`${noticeRows} WHERE n.id = ?`);
+const listAttachments = db.prepare('SELECT name, url FROM notice_attachments WHERE notice_id = ? ORDER BY id');
+const insertAttachment = db.prepare('INSERT INTO notice_attachments (notice_id, name, url) VALUES (?, ?, ?)');
+// 해커톤 사전공고 첨부 (사내 문서라 git 에는 올리지 않음: public/files/ 는 .gitignore). 파일이 있을 때만 시드에 붙인다.
+const hackathonNotice = {
+  name: '2026워크샵_비알프레임_해커톤_사전공고.html',
+  url: 'files/2026-workshop-hackathon-notice.html'
+};
 const listNotices = db.prepare(`${noticeRows} ORDER BY n.pinned DESC, n.created_at DESC, n.id DESC`);
 const homeNotices = db.prepare(`
   SELECT id, title, pinned, created_at AS createdAt FROM notices
@@ -349,7 +362,8 @@ function seedInitialRows() {
     INSERT INTO users (id, name, role, team, annual_total)
     VALUES (1, '김신입', 'employee', '개발팀', 15),
            (2, '이분석', 'employee', '개발팀', 15),
-           (3, '박팀장', 'manager', '개발팀', 20)
+           (3, '박팀장', 'manager', '개발팀', 20),
+           (4, '박사원', 'employee', '개발팀', 15)
   `);
 
   const today = localDate(new Date());
@@ -372,6 +386,16 @@ function seedInitialRows() {
       insertAttendance.run(id, day, clockTime(checkIn), clockTime(checkOut));
     }
   }
+
+  // 박사원: 오늘(주말이면 다음 평일) 승인된 연차 1일 → 홈·근태 화면에 "오늘 팀 부재자"로 보임
+  let absentDay = today;
+  while ([0, 6].includes(parseDate(absentDay).getUTCDay())) absentDay = addDays(absentDay, 1);
+  const approvedAt = new Date(`${addDays(today, -1)}T10:00:00`).toISOString();
+  db.prepare(`
+    INSERT INTO leave_requests (
+      user_id, type, start_date, end_date, days, reason, status, approver_id, comment, created_at, decided_at
+    ) VALUES (4, 'annual', ?, ?, 1, '가족 행사', 'approved', 3, '확인했습니다.', ?, ?)
+  `).run(absentDay, absentDay, approvedAt, approvedAt);
 
   const previousWeek = addDays(monday(today), -7);
   const lastFriday = addDays(previousWeek, 4);
@@ -397,7 +421,10 @@ function seedInitialRows() {
   ];
   for (const [index, [title, body, pinned]] of seedNotices.entries()) {
     const date = addDays(today, -seedNotices.length + index);
-    insertNotice.run(3, title, body, pinned, new Date(`${date}T09:00:00`).toISOString());
+    const { lastInsertRowid } = insertNotice.run(3, title, body, pinned, new Date(`${date}T09:00:00`).toISOString());
+    if (index === 0 && fs.existsSync(path.join(publicDir, hackathonNotice.url))) {
+      insertAttachment.run(lastInsertRowid, hackathonNotice.name, hackathonNotice.url);
+    }
   }
 }
 
@@ -584,7 +611,7 @@ function decideReport(id, status, { approverId, comment }) {
 }
 
 function noticeObject(row) {
-  return { ...row, pinned: Boolean(row.pinned) };
+  return { ...row, pinned: Boolean(row.pinned), attachments: listAttachments.all(row.id) };
 }
 
 function createNotice({ userId, title, body, pinned }) {

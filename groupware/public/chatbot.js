@@ -136,12 +136,25 @@
     sendBtn.disabled = true;
     say('me', text);
     input.value = '';
-    const typing = say('bot', '생각 중…');
+    const typing = say('bot', '');
     typing.classList.add('is-typing');
+    typing.querySelector('.cb-bubble').append(
+      h('span', { className: 'cb-dot' }), h('span', { className: 'cb-dot' }), h('span', { className: 'cb-dot' }));
+
+    // 사람처럼 보이도록 답장까지 최소 2~3초 기다린다 (서버가 더 오래 걸리면 추가로 기다리지 않음)
+    const minDelay = 2000 + Math.random() * 1000;
+    const started = performance.now();
+    const pad = () => new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, minDelay - (performance.now() - started))));
 
     try {
-      const res = await api('/api/chat', { method: 'POST', body: { userId, text } });
+      const res = await api('/api/chat', { method: 'POST', body: { userId, text } })
+        .finally(pad);
       typing.remove();
+      // 관련 화면으로 먼저 전환 (출퇴근, 주간보고, 연차, 승인, 홈)
+      if (res.screen && window.location.hash !== `#/${res.screen}`) {
+        window.location.hash = `#/${res.screen}`;
+      }
       const msg = say('bot', res.reply);
       if (res.warning) msg.append(h('div', { className: 'cb-note', text: res.warning }));
       if (res.action) await handleAction(res.action, msg);

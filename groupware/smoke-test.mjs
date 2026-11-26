@@ -70,7 +70,7 @@ async function step(name, test) {
 
 await step('Seeded user list and 15-day starting balance', async () => {
   const users = await request('/api/users');
-  expect(users.length, 3, 'user count');
+  expect(users.length, 4, 'user count');
   expectFields(users.find(({ id }) => id === employeeId), {
     id: employeeId, name: '김신입', role: 'employee', team: '개발팀'
   });
@@ -129,7 +129,7 @@ await step('Check-in updates home and duplicate check-in returns 409', async () 
 
 await step('Manager can view team attendance and non-manager receives 403', async () => {
   const team = await request(teamPath);
-  expect(team.length, 3, 'team member count');
+  expect(team.length, 4, 'team member count');
   expectFields(team.find((row) => row.userId === employeeId), {
     userName: '김신입', checkIn, status: 'working', late: checkIn > '09:00', onLeave: false
   });
