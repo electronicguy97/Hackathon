@@ -2,6 +2,13 @@
 
 const http = require('node:http');
 const { randomUUID } = require('node:crypto');
+
+// node:sqlite works without a flag from Node 22.13; older versions fail with a confusing error.
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 13)) {
+  console.error(`Node.js 22.13 이상이 필요합니다 (현재 ${process.versions.node}). https://nodejs.org 에서 LTS를 설치하세요.`);
+  process.exit(1);
+}
 const { DatabaseSync } = require('node:sqlite');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,11 +27,28 @@ const publicDir = path.join(__dirname, 'public');
 const dataDir = path.join(__dirname, 'data');
 const uploadsDir = path.join(dataDir, 'uploads');
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
+// Bump when a table changes. A demo DB from another version is moved aside and recreated,
+// because CREATE TABLE IF NOT EXISTS does not alter existing tables.
+const SCHEMA_VERSION = 1;
+const dbPath = path.join(dataDir, 'groupware.db');
 fs.mkdirSync(dataDir, { recursive: true });
-const db = new DatabaseSync(path.join(dataDir, 'groupware.db'));
+let db = new DatabaseSync(dbPath);
+const dbVersion = db.prepare('PRAGMA user_version').get().user_version;
+const hasTables = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1").get();
+if (hasTables && dbVersion !== SCHEMA_VERSION) {
+  db.close();
+  const suffix = `old-${Date.now()}`;
+  for (const name of ['groupware.db', 'groupware.db-wal', 'groupware.db-shm', 'uploads']) {
+    const file = path.join(dataDir, name);
+    if (fs.existsSync(file)) fs.renameSync(file, `${file}.${suffix}`);
+  }
+  console.log(`예전 버전 DB를 data/groupware.db.${suffix} 로 옮기고 새로 만듭니다.`);
+  db = new DatabaseSync(dbPath);
+}
 
 db.exec(`
   PRAGMA busy_timeout = 5000;
+  PRAGMA user_version = ${SCHEMA_VERSION};
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
