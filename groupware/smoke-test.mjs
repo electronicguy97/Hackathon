@@ -1,6 +1,8 @@
 const baseUrl = new URL(process.argv[2] ?? 'http://localhost:3000');
 const employeeId = 1;
 const managerId = 3;
+const dataManagerId = 6;
+const executiveId = 7;
 const balancePath = `/api/users/${employeeId}/balance`;
 const historyPath = `/api/leave-requests?userId=${employeeId}`;
 const queuePath = `/api/approvals?approverId=${managerId}`;
@@ -9,6 +11,8 @@ const managerHomePath = `/api/home?userId=${managerId}`;
 const teamPath = `/api/attendance/team?managerId=${managerId}`;
 const currentReportPath = `/api/weekly-reports/current?userId=${employeeId}`;
 const reportsPath = '/api/weekly-reports';
+const teamReportPath = `${reportsPath}/team?viewerId=${managerId}`;
+const executivePath = `/api/executive/weekly?executiveId=${executiveId}`;
 const minePath = `/api/approvals/mine?userId=${employeeId}`;
 const processedPath = `/api/approvals/history?approverId=${managerId}`;
 const application = {
@@ -21,10 +25,23 @@ const application = {
 const decision = { approverId: managerId, comment: '일정 확인했습니다.' };
 const rejection = { approverId: managerId, comment: '이슈 항목 보완' };
 const check = { userId: employeeId };
-const reportItems = [
-  { project: '그룹웨어', hours: 4, content: '연차 신청 화면 구현' },
-  { project: '그룹웨어', hours: 3.5, content: '출퇴근 기록 검증' }
-];
+const reportCurrent = {
+  personalSchedule: '금요일 오후 반차',
+  issues: '없음',
+  requests: '연동 일정 공유 요청',
+  entries: [
+    { day: 'mon', category: '운영 지원', workType: '회사', content: '출퇴근 기록 점검', hours: 1.5 },
+    { day: 'mon', category: '사내 그룹웨어', workType: '회사', content: '연차 신청 화면 구현', hours: 4 },
+    { day: 'tue', category: '사내 그룹웨어', workType: '재택', content: '검증 결과 정리\n결재 흐름 점검', hours: 2 }
+  ]
+};
+const reportNext = {
+  personalSchedule: '',
+  issues: '차주 검증 환경 구성',
+  requests: '',
+  entries: [{ day: 'wed', category: 'AI 챗봇 PoC', workType: '회사', content: '질문 흐름 검증', hours: 3 }]
+};
+const managerSummary = '그룹웨어 시연 결과를 정리하고 후속 검증을 진행합니다.';
 let today;
 let weekStart;
 let checkIn;
@@ -39,6 +56,20 @@ function expect(actual, expected, field) {
 
 function expectFields(value, fields) {
   for (const [key, expected] of Object.entries(fields)) expect(value[key], expected, key);
+}
+
+function offsetDay(day, offset) {
+  return new Date(Date.parse(`${day}T00:00:00Z`) + offset * 86_400_000).toISOString().slice(0, 10);
+}
+
+function expectedWeekLabel(start) {
+  const [, month, date] = offsetDay(start, 3).split('-').map(Number);
+  const range = [start, offsetDay(start, 4)].map((day) => day.slice(5).replace('-', '/'));
+  return `${month}월 ${Math.ceil(date / 7)}주차(${range.join(' ~ ')})`;
+}
+
+function weeklyPayload(overrides = {}) {
+  return { userId: employeeId, weekStart, current: reportCurrent, next: reportNext, submit: true, ...overrides };
 }
 
 async function request(path, expectedStatus = 200, body, method = 'POST') {
@@ -70,16 +101,19 @@ async function step(name, test) {
 
 await step('Seeded user list and 15-day starting balance', async () => {
   const users = await request('/api/users');
-  expect(users.length, 3, 'user count');
-  expectFields(users.find(({ id }) => id === employeeId), {
-    id: employeeId, name: '김신입', role: 'employee', team: '개발팀'
-  });
-  expectFields(users.find(({ id }) => id === 2), {
-    id: 2, name: '이분석', role: 'employee', team: '개발팀'
-  });
-  expectFields(users.find(({ id }) => id === managerId), {
-    id: managerId, name: '박팀장', role: 'manager', team: '개발팀'
-  });
+  const seeds = [
+    [1, '김신입', 'employee', '개발팀'],
+    [2, '이분석', 'employee', '개발팀'],
+    [3, '박팀장', 'manager', '개발팀'],
+    [4, '최데이터', 'employee', '데이터팀'],
+    [5, '정연구', 'employee', '데이터팀'],
+    [6, '한팀장', 'manager', '데이터팀'],
+    [7, '강상무', 'executive', '경영진']
+  ];
+  expect(users.length, seeds.length, 'user count');
+  for (const [id, name, role, team] of seeds) {
+    expectFields(users.find((user) => user.id === id), { id, name, role, team });
+  }
   expectFields(await request(balancePath), { total: 15, used: 0, pending: 0, remaining: 15 });
 });
 
@@ -95,24 +129,27 @@ await step('Home shows no check-in or current report before the demo', async () 
   expect(new Date(`${weekStart}T00:00:00Z`).getUTCDay(), 1, 'current week starts Monday');
 });
 
-await step('Seeded attendance records and monthly summary agree', async () => {
+await step('Seeded attendance records and monthly summaries agree for all seven users', async () => {
   const month = today.slice(0, 7);
-  const { records, summary } = await request(`/api/attendance?userId=${employeeId}&month=${month}`);
   const day = new Date(`${month}-01T00:00:00Z`);
   const workdays = [];
   while (day.toISOString().slice(0, 10) < today) {
     if ([1, 2, 3, 4, 5].includes(day.getUTCDay())) workdays.push(day.toISOString().slice(0, 10));
     day.setUTCDate(day.getUTCDate() + 1);
   }
-  expect(records.map((row) => row.workDate).join(), workdays.join(), 'seeded weekday records');
-  expectFields(summary, {
-    days: workdays.length,
-    totalMinutes: records.reduce((sum, row) => sum + row.workMinutes, 0),
-    lateCount: records.filter((row) => row.late).length
-  });
-  if (workdays.length) {
-    expect(summary.totalMinutes > 0, true, 'seeded work minutes');
-    expect(summary.lateCount, 1, 'seeded late count');
+  for (const userId of [1, 2, 3, 4, 5, 6, 7]) {
+    const { records, summary } = await request(`/api/attendance?userId=${userId}&month=${month}`);
+    expect(records.map((row) => row.workDate).join(), workdays.join(), `seeded weekday records for ${userId}`);
+    expectFields(summary, {
+      days: workdays.length,
+      totalMinutes: records.reduce((sum, row) => sum + row.workMinutes, 0),
+      lateCount: records.filter((row) => row.late).length
+    });
+    if (workdays.length) {
+      expect(summary.totalMinutes > 0, true, 'seeded work minutes');
+      expect([1, 2].includes(summary.lateCount), true, 'seeded late count');
+      if (userId === employeeId) expect(summary.lateCount, 1, 'employee seeded late count');
+    }
   }
 });
 
@@ -163,37 +200,80 @@ await step('Manager sees one request in the approval queue', async () => {
   expectFields(queue[0].detail, { id: requestId, userId: employeeId, days: 2 });
 });
 
-await step('Read the seeded weekly history and save this week as a draft', async () => {
-  const empty = await request(currentReportPath);
-  expectFields(empty, { weekStart, status: 'none', nextPlan: '', issues: '' });
-  expect(empty.items.length, 0, 'empty current report items');
-  const previousWeek = new Date(Date.parse(`${weekStart}T00:00:00Z`) - 7 * 86_400_000)
-    .toISOString().slice(0, 10);
-  for (const userId of [employeeId, 2]) {
+await step('Validate seeded week labels and prefill only last week’s next entries', async () => {
+  const template = await request(currentReportPath);
+  const previousWeek = offsetDay(weekStart, -7);
+  const blankNotes = { personalSchedule: '', issues: '', requests: '' };
+  expectFields(template, {
+    weekStart, status: 'none', weekLabel: expectedWeekLabel(weekStart),
+    nextWeekLabel: expectedWeekLabel(offsetDay(weekStart, 7)), nextTotalHours: 0
+  });
+  expectFields(template.current, blankNotes);
+  expectFields(template.next, blankNotes);
+  expect(template.next.entries.length, 0, 'empty next entries');
+  for (const userId of [employeeId, 2, 4, 5]) {
     const history = await request(`${reportsPath}?userId=${userId}`);
-    expect(history.length, 1, 'seeded weekly report count');
-    expectFields(history[0], { userId, weekStart: previousWeek, status: 'approved', approverId: managerId });
+    const previous = history.at(-1);
+    expect(history.length, userId <= 2 ? 1 : 2, 'seeded weekly report count');
+    expectFields(previous, {
+      userId, weekStart: previousWeek, status: 'approved', approverId: userId <= 2 ? managerId : dataManagerId,
+      weekLabel: expectedWeekLabel(previousWeek), nextWeekLabel: expectedWeekLabel(weekStart)
+    });
+    if (userId > 2) {
+      expectFields(history[0], {
+        userId, weekStart, weekLabel: expectedWeekLabel(weekStart), status: userId === 4 ? 'submitted' : 'draft'
+      });
+    }
+    if (userId === employeeId) {
+      expect(previous.next.entries.length > 0, true, 'seeded next entries');
+      expect(JSON.stringify(template.current.entries), JSON.stringify(previous.next.entries), 'prefilled entries');
+      expect(template.totalHours, previous.nextTotalHours, 'prefilled hours');
+    }
   }
-  const row = await request(reportsPath, 200, {
-    userId: employeeId, weekStart, items: reportItems, nextPlan: '통합 검증', issues: '', submit: false
-  }, 'PUT');
+  const november = await request(`${teamReportPath}&weekStart=2026-11-23`);
+  const december = await request(`${teamReportPath}&weekStart=2026-11-30`);
+  expect(november.weekLabel, '11월 4주차(11/23 ~ 11/27)', 'November week label');
+  expect(december.weekLabel, '12월 1주차(11/30 ~ 12/04)', 'Thursday month at boundary');
+});
+
+await step('Save the team member’s weekly form as a draft', async () => {
+  const row = await request(reportsPath, 200, weeklyPayload({ submit: false }), 'PUT');
   reportId = row.id;
-  expectFields(row, { status: 'draft', totalHours: 7.5, submittedAt: null, comment: null });
+  expectFields(row, { status: 'draft', team: '개발팀', totalHours: 7.5, nextTotalHours: 3, submittedAt: null, comment: null });
+  expectFields(row.current, { personalSchedule: reportCurrent.personalSchedule, issues: '없음' });
+  expectFields(row.next, { issues: reportNext.issues });
+  expect(row.current.entries[2].content, reportCurrent.entries[2].content, 'multiline work content');
   expectFields(await request(currentReportPath), { id: reportId, status: 'draft' });
   expect((await request(minePath)).some((item) => item.kind === 'weekly' && item.id === reportId),
     false, 'draft excluded from approvals');
 });
 
+await step('Weekly validation returns 400 for invalid days, work types, hours, daily totals and empty submission', async () => {
+  const entry = reportCurrent.entries[0];
+  const invalid = [
+    weeklyPayload({ current: { ...reportCurrent, entries: [{ ...entry, day: 'sat' }] } }),
+    weeklyPayload({ next: { ...reportNext, entries: [{ ...entry, workType: '기타' }] } }),
+    weeklyPayload({ current: { ...reportCurrent, entries: [{ ...entry, hours: 0 }] }, submit: false }),
+    weeklyPayload({ current: { ...reportCurrent, entries: [{ ...entry, hours: 25 }] } }),
+    weeklyPayload({ next: { ...reportNext, entries: [{ ...entry, hours: 12 }, { ...entry, hours: 13 }] } }),
+    weeklyPayload({ current: { ...reportCurrent, entries: [] } }),
+    weeklyPayload({ weekStart: offsetDay(weekStart, 1) })
+  ];
+  for (const payload of invalid) await request(reportsPath, 400, payload, 'PUT');
+  expectFields(await request(currentReportPath), { id: reportId, status: 'draft', totalHours: 7.5 });
+});
+
+await step('Managers and executives cannot save personal reports', async () => {
+  await request(reportsPath, 403, weeklyPayload({ userId: managerId }), 'PUT');
+  await request(reportsPath, 403, weeklyPayload({ userId: executiveId }), 'PUT');
+});
+
 await step('Submit the weekly report and verify two pending approvals on manager home', async () => {
-  const payload = {
-    userId: employeeId, weekStart, items: reportItems, nextPlan: '통합 검증', issues: '', submit: true
-  };
-  await request(reportsPath, 400, { ...payload, items: [] }, 'PUT');
-  await request(reportsPath, 400, { ...payload, items: [{ ...reportItems[0], hours: 0 }] }, 'PUT');
+  const payload = weeklyPayload();
   const row = await request(reportsPath, 200, payload, 'PUT');
   expectFields(row, {
     id: reportId, userId: employeeId, userName: '김신입', weekStart,
-    status: 'submitted', totalHours: 7.5, approverId: null, decidedAt: null
+    status: 'submitted', totalHours: 7.5, nextTotalHours: 3, approverId: null, decidedAt: null
   });
   expect(new Date(row.submittedAt).toISOString(), row.submittedAt, 'report submittedAt');
   await request(reportsPath, 409, payload, 'PUT');
@@ -201,11 +281,30 @@ await step('Submit the weekly report and verify two pending approvals on manager
   expect(queue.length, 2, 'combined queue count');
   expectFields(queue[0], { kind: 'leave', id: requestId, status: 'pending' });
   expectFields(queue[1], {
-    kind: 'weekly', id: reportId, status: 'submitted', title: `주간보고 ${weekStart} 주 (총 7.5시간)`
+    kind: 'weekly', id: reportId, status: 'submitted',
+    title: `주간보고 ${expectedWeekLabel(weekStart)} (총 7.5시간)`
   });
   expectFields(queue[1].detail, { id: reportId, status: 'submitted', totalHours: 7.5 });
   expectFields(await request(managerHomePath), { approvalPendingCount: 2 });
   expectFields(await request(employeeHomePath), { myPendingCount: 2, approvalPendingCount: 0 });
+});
+
+await step('Manager roll-up uses only submitted current work and includes members with no report', async () => {
+  const team = await request(teamReportPath);
+  expectFields(team, { team: '개발팀', managerName: '박팀장', weekStart, teamSummary: null });
+  expectFields(team.stats, { memberCount: 2, submittedCount: 1, approvedCount: 0, totalHours: 7.5 });
+  expectFields(team.members[0], { userId: employeeId, status: 'submitted', totalHours: 7.5 });
+  expectFields(team.members[0].report, { id: reportId, nextTotalHours: 3 });
+  expectFields(team.members[1], { userId: 2, status: 'none', totalHours: 0, report: null });
+  expect(team.members.length, 2, 'employees only');
+  expect(team.projectHours.length, 2, 'current projects only');
+  expectFields(team.projectHours[0], { category: '사내 그룹웨어', hours: 6 });
+  expectFields(team.projectHours[1], { category: '운영 지원', hours: 1.5 });
+  expect(team.issues.length, 0, 'exclude "없음" and next-week issues');
+  expectFields(team.requests[0], { userName: '김신입', text: reportCurrent.requests });
+  expectFields(team.personalSchedules[0], { userName: '김신입', text: reportCurrent.personalSchedule });
+  await request(`${reportsPath}/team?viewerId=${dataManagerId}&team=${encodeURIComponent('개발팀')}`, 403);
+  await request(`${reportsPath}/team?viewerId=${employeeId}`, 403);
 });
 
 await step('Non-manager approval returns 403', async () => {
@@ -256,13 +355,68 @@ await step('Employee sees approved history and a 13-day remaining balance', asyn
 
 await step('Employee fixes and resubmits the rejected weekly report', async () => {
   const issues = '일정 단축에 따른 통합 검증 이슈 정리';
-  const row = await request(reportsPath, 200, {
-    userId: employeeId, weekStart, items: reportItems, nextPlan: '통합 검증', issues, submit: true
-  }, 'PUT');
-  expectFields(row, { id: reportId, status: 'submitted', issues, comment: null, decidedAt: null });
-  expectFields(await request(currentReportPath), { id: reportId, status: 'submitted', issues });
+  const payload = weeklyPayload({ current: { ...reportCurrent, issues } });
+  const row = await request(reportsPath, 200, payload, 'PUT');
+  expectFields(row, { id: reportId, status: 'submitted', comment: null, decidedAt: null });
+  expect(row.current.issues, issues, 'submitted current issues');
+  const current = await request(currentReportPath);
+  expectFields(current, { id: reportId, status: 'submitted' });
+  expect(current.current.issues, issues, 'reloaded current issues');
   expectFields((await request(employeeHomePath)).weeklyReport, { weekStart, status: 'submitted' });
   expect((await request(managerHomePath)).approvalPendingCount, 1, 'manager home pending');
+});
+
+await step('Manager approves a submitted report and saves the team summary', async () => {
+  const approvalPath = `${reportsPath}/${reportId}/approve`;
+  await request(approvalPath, 403, { ...decision, approverId: dataManagerId });
+  await request(approvalPath, 403, { ...decision, approverId: executiveId });
+  const report = await request(approvalPath, 200, decision);
+  expectFields(report, { id: reportId, status: 'approved', ...decision });
+  await request(approvalPath, 409, decision);
+  await request(reportsPath, 409, weeklyPayload(), 'PUT');
+
+  const payload = { managerId, weekStart, summary: managerSummary };
+  await request('/api/team-summaries', 403, { ...payload, managerId: employeeId }, 'PUT');
+  await request('/api/team-summaries', 403, { ...payload, managerId: executiveId }, 'PUT');
+  const saved = await request('/api/team-summaries', 200, payload, 'PUT');
+  expectFields(saved, { summary: managerSummary, managerName: '박팀장' });
+  expect(new Date(saved.updatedAt).toISOString(), saved.updatedAt, 'team summary updatedAt');
+  const team = await request(teamReportPath);
+  expectFields(team.stats, { memberCount: 2, submittedCount: 1, approvedCount: 1, totalHours: 7.5 });
+  expectFields(team.teamSummary, saved);
+  expectFields(team.issues[0], { userName: '김신입', text: report.current.issues });
+});
+
+await step('Executive compares both teams and can read their summaries', async () => {
+  const overview = await request(`${executivePath}&weekStart=${weekStart}`);
+  expectFields(overview, { weekStart, weekLabel: expectedWeekLabel(weekStart) });
+  expect(overview.teams.map((team) => team.team).join(), '개발팀,데이터팀', 'sorted reporting teams');
+  const [development, data] = overview.teams;
+  expectFields(development.teamSummary, { summary: managerSummary, managerName: '박팀장' });
+  expectFields(development.stats, { memberCount: 2, submittedCount: 1, approvedCount: 1, totalHours: 7.5 });
+  expectFields(data.stats, { memberCount: 2, submittedCount: 1, approvedCount: 0, totalHours: 6 });
+  expectFields(data.projectHours[0], { category: '데이터 대시보드', hours: 6 });
+  expect(data.issues.length, 1, 'draft issue excluded from overview');
+  expect(overview.teams.some((team) => 'members' in team), false, 'overview omits members');
+  const previous = await request(`${executivePath}&weekStart=${offsetDay(weekStart, -7)}`);
+  for (const team of previous.teams) {
+    expectFields(team.stats, { memberCount: 2, submittedCount: 2, approvedCount: 2 });
+    expect(Boolean(team.teamSummary?.summary), true, 'seeded team summary');
+  }
+  await request(`/api/executive/weekly?executiveId=${employeeId}`, 403);
+});
+
+await step('Executive drill-down exposes approved and submitted reports while hiding draft detail', async () => {
+  const path = `${reportsPath}/team?viewerId=${executiveId}&weekStart=${weekStart}`;
+  const development = await request(`${path}&team=${encodeURIComponent('개발팀')}`);
+  expectFields(development.teamSummary, { summary: managerSummary, managerName: '박팀장' });
+  expectFields(development.members[0].report, { id: reportId, status: 'approved' });
+  const data = await request(`${path}&team=${encodeURIComponent('데이터팀')}`);
+  expectFields(data.members[0].report, { userId: 4, status: 'submitted' });
+  expectFields(data.members[1], { userId: 5, status: 'draft', report: null });
+  const managerView = await request(`${reportsPath}/team?viewerId=${dataManagerId}&weekStart=${weekStart}`);
+  expectFields(managerView.members[1].report, { userId: 5, status: 'draft' });
+  await request(path, 400);
 });
 
 await step('Check-out updates the home card and duplicate check-out returns 409', async () => {
@@ -325,10 +479,7 @@ await step('Notice list and home are pinned first, with creation restricted to m
   expectFields(home.notices[0], { id: created.id, pinned: true, title: payload.title });
 });
 
-await step('Manager can approve a submitted report and reject a pending leave', async () => {
-  const report = await request(`${reportsPath}/${reportId}/approve`, 200, decision);
-  expectFields(report, { id: reportId, status: 'approved', ...decision });
-  await request(`${reportsPath}/${reportId}/approve`, 409, decision);
+await step('Manager can reject a pending leave', async () => {
   const date = '2026-12-04';
   const leave = await request('/api/leave-requests', 201, {
     ...application, userId: 2, startDate: date, endDate: date
@@ -351,4 +502,115 @@ await step('Home and manager attendance show today’s approved team absences', 
     onLeave, 'approved team absence on home');
   const team = await request(teamPath);
   expectFields(team.find((row) => row.userId === 2), { onLeave });
+});
+
+const reservationsPath = '/api/room-reservations';
+const myReservationsPath = `${reservationsPath}/mine?userId=${employeeId}`;
+let nextBooking;
+let booked;
+let bookedToday;
+
+await step('Four Magok rooms and five seeded reservations are visible for their dates', async () => {
+  const rooms = await request('/api/rooms');
+  const expectedRooms = [
+    [1, '대회의실', 12, 'TV·화상회의'],
+    [2, '중회의실', 8, 'TV'],
+    [3, '소회의실 A', 4, ''],
+    [4, '소회의실 B', 4, '']
+  ];
+  expect(rooms.length, expectedRooms.length, 'room count');
+  for (const [id, name, capacity, equipment] of expectedRooms) {
+    expectFields(rooms[id - 1], { id, office: '마곡 사무실', name, capacity, equipment });
+  }
+  const current = await request(`${reservationsPath}?date=${today}`);
+  expect(current.length, 3, 'reservations seeded for today');
+  expect(current.map((row) => row.roomId).join(), '1,2,3', 'reservations ordered by room');
+  expectFields(current[0], {
+    date: today, roomName: '대회의실', status: 'reserved', userName: '박팀장', startTime: '10:00', endTime: '11:00'
+  });
+
+  let nextWeekday = offsetDay(today, 1);
+  while ([0, 6].includes(new Date(`${nextWeekday}T00:00:00Z`).getUTCDay())) {
+    nextWeekday = offsetDay(nextWeekday, 1);
+  }
+  const next = await request(`${reservationsPath}?date=${nextWeekday}`);
+  expect(next.length, 2, 'reservations seeded for the next weekday');
+  expect(next.every((row) => row.date === nextWeekday && row.status === 'reserved'), true, 'next weekday dates');
+  nextBooking = {
+    userId: employeeId, roomId: 4, date: nextWeekday, startTime: '10:00', endTime: '11:00',
+    title: '그룹웨어 시연 점검', attendees: '김신입, 이분석'
+  };
+});
+
+await step('A free next-weekday slot can be booked and appears in my reservations and the daily schedule', async () => {
+  booked = await request(reservationsPath, 201, nextBooking);
+  expectFields(booked, {
+    ...nextBooking, roomName: '소회의실 B', userName: '김신입', team: '개발팀', status: 'reserved'
+  });
+  expect(new Date(booked.createdAt).toISOString(), booked.createdAt, 'reservation createdAt');
+  const mine = await request(myReservationsPath);
+  expectFields(mine.at(-1), { id: booked.id, date: nextBooking.date, status: 'reserved' });
+  const day = await request(`${reservationsPath}?date=${nextBooking.date}`);
+  expectFields(day.find((row) => row.id === booked.id), { title: nextBooking.title, roomId: nextBooking.roomId });
+});
+
+await step('A reservation today appears in my reservations and the ordered home summary', async () => {
+  bookedToday = await request(reservationsPath, 201, {
+    ...nextBooking, date: today, startTime: '08:00', endTime: '08:30', title: '오늘 시연 준비'
+  });
+  const mine = await request(myReservationsPath);
+  expect(mine[0].id, bookedToday.id, 'mine ordered by date and start time');
+  const home = await request(employeeHomePath);
+  expectFields(home.myReservationsToday[0], {
+    id: bookedToday.id, roomName: '소회의실 B', startTime: '08:00', endTime: '08:30', title: '오늘 시연 준비'
+  });
+  expect(Object.keys(home.myReservationsToday[0]).sort().join(), 'endTime,id,roomName,startTime,title',
+    'home reservation response fields');
+  expect(home.myReservationsToday.some((row) => row.id === booked.id), false, 'future reservation in home');
+});
+
+await step('Overlap returns the Korean 409 conflict and an adjacent booking succeeds', async () => {
+  const overlap = await request(reservationsPath, 409, {
+    ...nextBooking, userId: 2, startTime: '10:30', endTime: '11:30'
+  });
+  expect(overlap.error, '이미 예약된 시간입니다 (10:00~11:00, 김신입)', 'overlap error');
+  const adjacent = await request(reservationsPath, 201, {
+    ...nextBooking, startTime: '09:30', endTime: '10:00', title: '이전 회의'
+  });
+  expectFields(adjacent, { startTime: '09:30', endTime: booked.startTime, status: 'reserved' });
+  const day = await request(`${reservationsPath}?date=${nextBooking.date}`);
+  expect(day.filter((row) => row.roomId === booked.roomId).map((row) => row.id).join(),
+    [adjacent.id, booked.id].join(), 'same-room start time order');
+});
+
+await step('Reservation rejects past dates, invalid hours, non-half-hour slots and missing titles', async () => {
+  const invalid = [
+    { ...nextBooking, date: offsetDay(today, -1) },
+    { ...nextBooking, date: '2026-02-30' },
+    { ...nextBooking, startTime: '07:30' },
+    { ...nextBooking, startTime: '19:30', endTime: '20:30' },
+    { ...nextBooking, startTime: '10:15' },
+    { ...nextBooking, startTime: '11:00' },
+    { ...nextBooking, startTime: '11:30' },
+    { ...nextBooking, title: undefined }
+  ];
+  for (const payload of invalid) await request(reservationsPath, 400, payload);
+});
+
+await step('Cancellation is owner-only, removes the active booking and frees the same slot', async () => {
+  const cancelPath = `${reservationsPath}/${booked.id}/cancel`;
+  await request(cancelPath, 403, { userId: 2 });
+  const cancelled = await request(cancelPath, 200, check);
+  expectFields(cancelled, { id: booked.id, userId: employeeId, status: 'cancelled' });
+  await request(cancelPath, 409, check);
+  const day = await request(`${reservationsPath}?date=${nextBooking.date}`);
+  expect(day.some((row) => row.id === booked.id), false, 'cancelled reservation in daily schedule');
+  const mine = await request(myReservationsPath);
+  expect(mine.some((row) => row.id === booked.id), false, 'cancelled reservation in mine');
+  const rebooked = await request(reservationsPath, 201, { ...nextBooking, userId: 2 });
+  expectFields(rebooked, { startTime: booked.startTime, endTime: booked.endTime, userId: 2, status: 'reserved' });
+
+  await request(`${reservationsPath}/${bookedToday.id}/cancel`, 200, check);
+  const home = await request(employeeHomePath);
+  expect(home.myReservationsToday.some((row) => row.id === bookedToday.id), false, 'cancelled reservation in home');
 });
